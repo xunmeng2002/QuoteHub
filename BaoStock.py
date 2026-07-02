@@ -71,7 +71,7 @@ def login_with_retry(
 
 
 def init_database(connection: sqlite3.Connection) -> None:
-    """初始化数据库：创建价格表，重建因子表。"""
+    """初始化数据库：创建价格表、因子表、证券合约表。"""
     connection.execute("""
         CREATE TABLE IF NOT EXISTS daily_raw_prices (
             Code TEXT NOT NULL,
@@ -97,8 +97,40 @@ def init_database(connection: sqlite3.Connection) -> None:
             PRIMARY KEY (Code, EventDate)
         );
     """)
+    # 证券合约表（只创建不重建，保证数据不丢失）
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS securities (
+            Code TEXT PRIMARY KEY,
+            CodeName TEXT,
+            IpoDate TEXT,
+            DelistDate TEXT,
+            StockType TEXT,
+            Exchange TEXT,
+            IndustryCode TEXT,
+            IndustryName TEXT,
+            CurrentTradeStatus TEXT,
+            UpdatedAt TEXT
+        );
+    """)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS trade_status_log (
+            Code TEXT NOT NULL,
+            Date TEXT NOT NULL,
+            TradeStatus TEXT,
+            PRIMARY KEY (Code, Date)
+        );
+    """)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS name_change_log (
+            Code TEXT NOT NULL,
+            Date TEXT NOT NULL,
+            OldName TEXT,
+            NewName TEXT,
+            PRIMARY KEY (Code, Date)
+        );
+    """)
     connection.commit()
-    logger.info("数据库表初始化完成（因子表已重建）")
+    logger.info("数据库表初始化完成（因子表已重建，证券表已确保存在）")
 
 
 # ---------- 查最新日期 ----------
@@ -197,6 +229,148 @@ def fetch_and_store_stock(
     return len(price_frame)
 
 
+# ---------- 证券合约同步 ----------
+
+
+def sync_securities(connection: sqlite3.Connection) -> None:
+    """同步全市场证券列表及交易状态（每日更新）。
+
+    从 Baostock 拉取最新全市场证券列表，与本地 securities 表对比，
+    自动处理：新股 IPO → 插入，退市 → 标记，更名/停复牌 → 记录日志。
+    """
+    today = datetime.today().strftime("%Y-%m-%d")
+
+    # 1. 获取今日全市场证券列表
+    result = bs.query_all_stock(day=today)
+    if result.error_code != "0":
+        logger.error(f"获取证券列表失败: {result.error_msg}")
+        return
+
+    all_stocks = result.get_data()
+    if all_stocks.empty:
+        logger.info(f"{today} 无证券列表返回（可能非交易日），跳过证券同步")
+        return
+
+    all_stocks.columns = all_stocks.columns.str.strip()
+    logger.info(f"今日全市场证券总数: {len(all_stocks)}")
+
+    # 2. 对比本地已有数据
+    local_codes: set[str] = set(
+        row[0] for row in connection.execute("SELECT Code FROM securities")
+    )
+    today_codes: set[str] = set(all_stocks["code"].tolist())
+
+    new_codes = today_codes - local_codes
+    removed_codes = local_codes - today_codes
+    common_codes = local_codes & today_codes
+
+    # 3. 新股 IPO
+    if new_codes:
+        # 批量获取基本信息，避免逐个查询
+        basic_map: dict[str, dict[str, str]] = {}
+        basic_result = bs.query_stock_basic(code="")
+        if basic_result.error_code == "0":
+            basic_df = basic_result.get_data()
+            basic_df.columns = basic_df.columns.str.strip()
+            basic_map = {
+                row["code"]: {
+                    "ipoDate": row["ipoDate"],
+                    "outDate": row["outDate"],
+                    "type": row["type"],
+                }
+                for _, row in basic_df.iterrows()
+                if row["code"] in new_codes
+            }
+        else:
+            logger.warning(f"新股基本信息批量查询失败: {basic_result.error_msg}")
+
+        for code in new_codes:
+            stock_row = all_stocks[all_stocks["code"] == code].iloc[0]
+            basic = basic_map.get(code, {})
+            out_date = basic.get("outDate", "")
+            connection.execute(
+                """INSERT INTO securities
+                   (Code, CodeName, IpoDate, DelistDate, StockType, Exchange,
+                    CurrentTradeStatus, UpdatedAt)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    code,
+                    stock_row["code_name"],
+                    basic.get("ipoDate", ""),
+                    None if out_date in (None, "") else out_date,
+                    basic.get("type", ""),
+                    code[:2],
+                    str(int(stock_row["tradeStatus"])),
+                    today,
+                ),
+            )
+            type_label = "股票" if basic.get("type") == "1" else "非股票"
+            logger.info(f"新增证券 {code} {stock_row['code_name']}（{type_label}）")
+
+    # 4. 退市处理
+    for code in removed_codes:
+        connection.execute(
+            """UPDATE securities
+               SET DelistDate = ?, CurrentTradeStatus = '0', UpdatedAt = ?
+               WHERE Code = ?""",
+            (today, today, code),
+        )
+        logger.info(f"证券 {code} 已退市，标记退市日期 {today}")
+
+    # 5. 常态检查 common_codes：更名、停复牌
+    #    先全部加载到内存，避免 5000+ 次单独查询
+    local_info_map: dict[str, tuple[str, str]] = {
+        row[0]: (row[1], str(row[2] if row[2] else ""))
+        for row in connection.execute(
+            "SELECT Code, CodeName, CurrentTradeStatus FROM securities"
+        )
+    }
+
+    for code in common_codes:
+        stock_row = all_stocks[all_stocks["code"] == code].iloc[0]
+        local_info = local_info_map.get(code)
+        if local_info is None:
+            continue
+
+        local_name, local_status = local_info
+        current_name = stock_row["code_name"]
+        current_status = str(int(stock_row["tradeStatus"]))
+
+        # 名称变更
+        if local_name != current_name:
+            connection.execute(
+                "INSERT INTO name_change_log (Code, Date, OldName, NewName) "
+                "VALUES (?, ?, ?, ?)",
+                (code, today, local_name, current_name),
+            )
+            connection.execute(
+                "UPDATE securities SET CodeName = ?, UpdatedAt = ? WHERE Code = ?",
+                (current_name, today, code),
+            )
+            logger.info(f"证券 {code} 更名: 「{local_name}」→「{current_name}」")
+
+        # 交易状态变更（停牌/复牌）
+        if local_status != current_status:
+            connection.execute(
+                "INSERT INTO trade_status_log (Code, Date, TradeStatus) "
+                "VALUES (?, ?, ?)",
+                (code, today, current_status),
+            )
+            connection.execute(
+                "UPDATE securities SET CurrentTradeStatus = ?, UpdatedAt = ? "
+                "WHERE Code = ?",
+                (current_status, today, code),
+            )
+            status_label = "复牌" if current_status == "1" else "停牌"
+            logger.info(f"证券 {code} {status_label}（{local_status} → {current_status}）")
+
+    connection.commit()
+    logger.info(
+        f"证券同步完成: 总数 {len(today_codes)}, "
+        f"新增 {len(new_codes)}, 退市 {len(removed_codes)}"
+    )
+
+
 # ---------- 主流程 ----------
 
 
@@ -229,6 +403,8 @@ def update_all() -> None:
             return
 
         try:
+            sync_securities(connection)
+
             for stock_code in stock_codes:
                 logger.info(f"处理 {stock_code} ...")
                 last_date = get_last_date(connection, stock_code)
@@ -260,5 +436,16 @@ def update_all() -> None:
 if __name__ == "__main__":
     if "--update" in sys.argv:
         update_all()
+    elif "--sync-securities" in sys.argv:
+        with sqlite3.connect(DB_PATH) as connection:
+            init_database(connection)
+            login_result = login_with_retry()
+            if login_result is None:
+                logger.error("Baostock 登录失败，证券同步无法继续")
+            else:
+                try:
+                    sync_securities(connection)
+                finally:
+                    bs.logout()
     else:
-        logger.info("执行更新请添加参数 --update，例如：python BaoStock.py --update")
+        logger.info("用法: python BaoStock.py --update | --sync-securities")
