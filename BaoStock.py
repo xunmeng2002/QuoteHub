@@ -71,66 +71,21 @@ def login_with_retry(
 
 
 def init_database(connection: sqlite3.Connection) -> None:
-    """初始化数据库：创建价格表、因子表、证券合约表。"""
-    connection.execute("""
-        CREATE TABLE IF NOT EXISTS daily_raw_prices (
-            Code TEXT NOT NULL,
-            Date TEXT NOT NULL,
-            Open REAL,
-            High REAL,
-            Low REAL,
-            Close REAL,
-            Volume REAL,
-            Amount REAL,
-            PRIMARY KEY (Code, Date)
-        );
-    """)
-    # 因子表可能因字段变动而重建
-    connection.execute("DROP TABLE IF EXISTS adjust_factors")
-    connection.execute("""
-        CREATE TABLE adjust_factors (
-            Code TEXT NOT NULL,
-            EventDate TEXT NOT NULL,
-            ForeFactor REAL,
-            BackFactor REAL,
-            CumFactor REAL,
-            PRIMARY KEY (Code, EventDate)
-        );
-    """)
-    # 证券合约表（只创建不重建，保证数据不丢失）
-    connection.execute("""
-        CREATE TABLE IF NOT EXISTS securities (
-            Code TEXT PRIMARY KEY,
-            CodeName TEXT,
-            IpoDate TEXT,
-            DelistDate TEXT,
-            StockType TEXT,
-            Exchange TEXT,
-            IndustryCode TEXT,
-            IndustryName TEXT,
-            CurrentTradeStatus TEXT,
-            UpdatedAt TEXT
-        );
-    """)
-    connection.execute("""
-        CREATE TABLE IF NOT EXISTS trade_status_log (
-            Code TEXT NOT NULL,
-            Date TEXT NOT NULL,
-            TradeStatus TEXT,
-            PRIMARY KEY (Code, Date)
-        );
-    """)
-    connection.execute("""
-        CREATE TABLE IF NOT EXISTS name_change_log (
-            Code TEXT NOT NULL,
-            Date TEXT NOT NULL,
-            OldName TEXT,
-            NewName TEXT,
-            PRIMARY KEY (Code, Date)
-        );
-    """)
+    """初始化数据库：从 schema 文件加载 DDL，清理旧命名表。"""
+    schema_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "sql", "schema"
+    )
+    schema_path = os.path.join(schema_dir, "Create_v1.0.0.sql")
+
+    if not os.path.exists(schema_path):
+        logger.error(f"Schema 文件不存在: {schema_path}")
+        return
+
+    with open(schema_path, "r", encoding="utf-8") as schema_file:
+        connection.executescript(schema_file.read())
+
     connection.commit()
-    logger.info("数据库表初始化完成（因子表已重建，证券表已确保存在）")
+    logger.info("数据库 Schema 初始化完成（v1.0.0）")
 
 
 # ---------- 查最新日期 ----------
@@ -141,7 +96,12 @@ def get_last_date(
     stock_code: str,
 ) -> str | None:
     cursor = connection.execute(
-        "SELECT MAX(Date) FROM daily_raw_prices WHERE Code = ?",
+        """SELECT
+               MAX(Date)
+           FROM
+               DailyRawPrices
+           WHERE
+               Code = ?""",
         (stock_code,),
     )
     row = cursor.fetchone()
@@ -215,7 +175,7 @@ def fetch_and_store_stock(
                     )
 
             factor_frame.to_sql(
-                "adjust_factors", connection, if_exists="append", index=False
+                "AdjustFactors", connection, if_exists="append", index=False
             )
             logger.info(f"{stock_code} 复权因子新增 {len(factor_frame)} 条")
     else:
@@ -223,7 +183,7 @@ def fetch_and_store_stock(
 
     # 3. 写入价格
     price_frame.to_sql(
-        "daily_raw_prices", connection, if_exists="append", index=False
+        "DailyRawPrices", connection, if_exists="append", index=False
     )
     logger.info(f"{stock_code} 原始价格新增 {len(price_frame)} 条")
     return len(price_frame)
@@ -246,7 +206,9 @@ def sync_securities(connection: sqlite3.Connection) -> None:
         logger.error(f"获取证券列表失败: {result.error_msg}")
         return
 
-    all_stocks = result.get_data()
+    all_stocks = pd.DataFrame(
+        _collect_rows(result), columns=result.fields
+    )
     if all_stocks.empty:
         logger.info(f"{today} 无证券列表返回（可能非交易日），跳过证券同步")
         return
@@ -256,7 +218,7 @@ def sync_securities(connection: sqlite3.Connection) -> None:
 
     # 2. 对比本地已有数据
     local_codes: set[str] = set(
-        row[0] for row in connection.execute("SELECT Code FROM securities")
+        row[0] for row in connection.execute("SELECT Code FROM Securities")
     )
     today_codes: set[str] = set(all_stocks["code"].tolist())
 
@@ -270,7 +232,9 @@ def sync_securities(connection: sqlite3.Connection) -> None:
         basic_map: dict[str, dict[str, str]] = {}
         basic_result = bs.query_stock_basic(code="")
         if basic_result.error_code == "0":
-            basic_df = basic_result.get_data()
+            basic_df = pd.DataFrame(
+                _collect_rows(basic_result), columns=basic_result.fields
+            )
             basic_df.columns = basic_df.columns.str.strip()
             basic_map = {
                 row["code"]: {
@@ -289,7 +253,7 @@ def sync_securities(connection: sqlite3.Connection) -> None:
             basic = basic_map.get(code, {})
             out_date = basic.get("outDate", "")
             connection.execute(
-                """INSERT INTO securities
+                """INSERT INTO Securities
                    (Code, CodeName, IpoDate, DelistDate, StockType, Exchange,
                     CurrentTradeStatus, UpdatedAt)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -310,7 +274,7 @@ def sync_securities(connection: sqlite3.Connection) -> None:
     # 4. 退市处理
     for code in removed_codes:
         connection.execute(
-            """UPDATE securities
+            """UPDATE Securities
                SET DelistDate = ?, CurrentTradeStatus = '0', UpdatedAt = ?
                WHERE Code = ?""",
             (today, today, code),
@@ -322,7 +286,7 @@ def sync_securities(connection: sqlite3.Connection) -> None:
     local_info_map: dict[str, tuple[str, str]] = {
         row[0]: (row[1], str(row[2] if row[2] else ""))
         for row in connection.execute(
-            "SELECT Code, CodeName, CurrentTradeStatus FROM securities"
+            "SELECT Code, CodeName, CurrentTradeStatus FROM Securities"
         )
     }
 
@@ -339,12 +303,12 @@ def sync_securities(connection: sqlite3.Connection) -> None:
         # 名称变更
         if local_name != current_name:
             connection.execute(
-                "INSERT INTO name_change_log (Code, Date, OldName, NewName) "
+                "INSERT INTO NameChangeLogs (Code, Date, OldName, NewName) "
                 "VALUES (?, ?, ?, ?)",
                 (code, today, local_name, current_name),
             )
             connection.execute(
-                "UPDATE securities SET CodeName = ?, UpdatedAt = ? WHERE Code = ?",
+                "UPDATE Securities SET CodeName = ?, UpdatedAt = ? WHERE Code = ?",
                 (current_name, today, code),
             )
             logger.info(f"证券 {code} 更名: 「{local_name}」→「{current_name}」")
@@ -352,12 +316,12 @@ def sync_securities(connection: sqlite3.Connection) -> None:
         # 交易状态变更（停牌/复牌）
         if local_status != current_status:
             connection.execute(
-                "INSERT INTO trade_status_log (Code, Date, TradeStatus) "
+                "INSERT INTO TradeStatusLogs (Code, Date, TradeStatus) "
                 "VALUES (?, ?, ?)",
                 (code, today, current_status),
             )
             connection.execute(
-                "UPDATE securities SET CurrentTradeStatus = ?, UpdatedAt = ? "
+                "UPDATE Securities SET CurrentTradeStatus = ?, UpdatedAt = ? "
                 "WHERE Code = ?",
                 (current_status, today, code),
             )
