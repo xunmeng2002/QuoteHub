@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS DividendData (
     DividStocksPs         REAL,
     DividCashStock        REAL,
     DividReserveToStockPs REAL,
-    CONSTRAINT PkDividendData PRIMARY KEY (Code, DividOperateDate)
+    CONSTRAINT PkDividendData PRIMARY KEY (Code, Year, YearType, DividOperateDate)
 );
 
 -- ===================================================================
@@ -199,25 +199,43 @@ CREATE TABLE IF NOT EXISTS TradeDates (
 -- 宏观经济数据（5 张表）
 -- ===================================================================
 
+-- 存款利率（Baostock 宽表格式：每种利率类型独立列）
 CREATE TABLE IF NOT EXISTS DepositRates (
-    PubDate     TEXT NOT NULL,
-    DepositType TEXT NOT NULL,
-    DepositRate REAL,
-    CONSTRAINT PkDepositRates PRIMARY KEY (PubDate, DepositType)
+    PubDate                          TEXT NOT NULL,
+    DemandDepositRate                REAL,
+    FixedDepositRate3Month           REAL,
+    FixedDepositRate6Month           REAL,
+    FixedDepositRate1Year            REAL,
+    FixedDepositRate2Year            REAL,
+    FixedDepositRate3Year            REAL,
+    FixedDepositRate5Year            REAL,
+    InstallmentFixedDepositRate1Year REAL,
+    InstallmentFixedDepositRate3Year REAL,
+    InstallmentFixedDepositRate5Year REAL,
+    CONSTRAINT PkDepositRates PRIMARY KEY (PubDate)
 );
 
+-- 贷款利率（Baostock 宽表格式）
 CREATE TABLE IF NOT EXISTS LoanRates (
-    PubDate   TEXT NOT NULL,
-    LoanType  TEXT NOT NULL,
-    LoanRate  REAL,
-    CONSTRAINT PkLoanRates PRIMARY KEY (PubDate, LoanType)
+    PubDate             TEXT NOT NULL,
+    LoanRate6Month      REAL,
+    LoanRate6MonthTo1Year REAL,
+    LoanRate1YearTo3Year  REAL,
+    LoanRate3YearTo5Year  REAL,
+    LoanRateAbove5Year    REAL,
+    MortgateRateBelow5Year  REAL,
+    MortgateRateAbove5Year  REAL,
+    CONSTRAINT PkLoanRates PRIMARY KEY (PubDate)
 );
 
+-- 存款准备金率（Baostock 宽表格式）
 CREATE TABLE IF NOT EXISTS ReserveRatios (
-    PubDate          TEXT NOT NULL,
-    EffectiveDate    TEXT,
-    DepositRate      REAL,
-    SmallDepositRate REAL,
+    PubDate                    TEXT NOT NULL,
+    EffectiveDate              TEXT,
+    BigInstitutionsRatioPre    REAL,
+    BigInstitutionsRatioAfter  REAL,
+    MediumInstitutionsRatioPre    REAL,
+    MediumInstitutionsRatioAfter  REAL,
     CONSTRAINT PkReserveRatios PRIMARY KEY (PubDate)
 );
 

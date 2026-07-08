@@ -158,6 +158,9 @@ def _get_previous_trading_date(
     start = (today - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     end = yesterday.strftime("%Y-%m-%d")
     result = bs.query_trade_dates(start_date=start, end_date=end)
+    if result is None:
+        logger.warning("交易日历查询返回空，将使用当天作为回退")
+        return None
     if result.error_code != "0":
         logger.warning(f"交易日历查询失败（推算交易日时将使用当天）: {result.error_msg}")
         return None
@@ -451,7 +454,10 @@ def _fetch_and_store_financial(
         (code, year, quarter),
     )
 
-    result = query_func(code, year, quarter)
+    result = query_func(code, str(year), str(quarter))
+    if result is None:
+        logger.info(f"{code} {table_name} {year}Q{quarter} 无返回值")
+        return 0
     if result.error_code != "0":
         logger.error(
             f"{code} {table_name} 查询失败 ({year}Q{quarter}): {result.error_msg}"
@@ -638,6 +644,9 @@ def update_dividend_data(
                 for col in numeric_fields:
                     if col in frame.columns:
                         frame[col] = pd.to_numeric(frame[col], errors="coerce")
+                frame = frame.drop_duplicates(
+                    subset=["Code", "Year", "YearType", "DividOperateDate"]
+                )
                 frame.to_sql("DividendData", connection, if_exists="append", index=False)
                 total += len(frame)
     logger.info(f"除权除息数据更新完成，总写入 {total} 条")
@@ -657,11 +666,8 @@ def update_performance_express(
     """下载业绩快报。"""
     if years is None or quarters is None:
         yq_pairs = _default_year_quarters()
-        year_list = sorted({y for y, _ in yq_pairs})
-        quarter_list = [1, 2, 3, 4]
     else:
-        year_list = years
-        quarter_list = quarters
+        yq_pairs = [(y, q) for y in years for q in quarters]
 
     total = 0
 
@@ -678,29 +684,31 @@ def update_performance_express(
     numeric_fields = ["Revenue", "DeductedNP", "NetProfit", "EPSChgPct", "ROEChgPct"]
 
     for code in stock_codes:
-        for year in year_list:
-            for quarter in quarter_list:
-                connection.execute(
-                    "DELETE FROM PerformanceExpress WHERE Code=? AND Year=? AND Quarter=?",
-                    (code, year, quarter),
-                )
-                result = bs.query_performance_express_report(code, year, quarter)
-                if result.error_code != "0":
-                    continue
-                rows = _collect_rows(result)
-                if not rows:
-                    continue
-                frame = pd.DataFrame(rows, columns=result.fields)
-                frame["Year"] = year
-                frame["Quarter"] = quarter
-                frame = frame.rename(columns=column_map)
-                for col in numeric_fields:
-                    if col in frame.columns:
-                        frame[col] = pd.to_numeric(frame[col], errors="coerce")
-                frame.to_sql(
-                    "PerformanceExpress", connection, if_exists="append", index=False
-                )
-                total += len(frame)
+        for year, quarter in yq_pairs:
+            connection.execute(
+                "DELETE FROM PerformanceExpress WHERE Code=? AND Year=? AND Quarter=?",
+                (code, year, quarter),
+            )
+            result = bs.query_performance_express_report(code, str(year), str(quarter))
+            if result is None:
+                logger.info(f"{code} 业绩快报 {year}Q{quarter} 无返回值")
+                continue
+            if result.error_code != "0":
+                continue
+            rows = _collect_rows(result)
+            if not rows:
+                continue
+            frame = pd.DataFrame(rows, columns=result.fields)
+            frame["Year"] = year
+            frame["Quarter"] = quarter
+            frame = frame.rename(columns=column_map)
+            for col in numeric_fields:
+                if col in frame.columns:
+                    frame[col] = pd.to_numeric(frame[col], errors="coerce")
+            frame.to_sql(
+                "PerformanceExpress", connection, if_exists="append", index=False
+            )
+            total += len(frame)
     logger.info(f"业绩快报更新完成，总写入 {total} 条")
 
 
@@ -718,11 +726,8 @@ def update_forecast_reports(
     """下载业绩预告。"""
     if years is None or quarters is None:
         yq_pairs = _default_year_quarters()
-        year_list = sorted({y for y, _ in yq_pairs})
-        quarter_list = [1, 2, 3, 4]
     else:
-        year_list = years
-        quarter_list = quarters
+        yq_pairs = [(y, q) for y in years for q in quarters]
 
     total = 0
 
@@ -738,32 +743,34 @@ def update_forecast_reports(
     numeric_fields = ["profitForcastChgPctUp", "profitForcastChgPctDwn"]
 
     for code in stock_codes:
-        for year in year_list:
-            for quarter in quarter_list:
-                connection.execute(
-                    "DELETE FROM ForecastReports WHERE Code=? AND Year=? AND Quarter=?",
-                    (code, year, quarter),
-                )
-                result = bs.query_forecast_report(code, year, quarter)
-                if result.error_code != "0":
-                    continue
-                rows = _collect_rows(result)
-                if not rows:
-                    continue
-                frame = pd.DataFrame(rows, columns=result.fields)
-                frame["Year"] = year
-                frame["Quarter"] = quarter
-                frame = frame.rename(columns=field_mapping)
+        for year, quarter in yq_pairs:
+            connection.execute(
+                "DELETE FROM ForecastReports WHERE Code=? AND Year=? AND Quarter=?",
+                (code, year, quarter),
+            )
+            result = bs.query_forecast_report(code, str(year), str(quarter))
+            if result is None:
+                logger.info(f"{code} 业绩预告 {year}Q{quarter} 无返回值")
+                continue
+            if result.error_code != "0":
+                continue
+            rows = _collect_rows(result)
+            if not rows:
+                continue
+            frame = pd.DataFrame(rows, columns=result.fields)
+            frame["Year"] = year
+            frame["Quarter"] = quarter
+            frame = frame.rename(columns=field_mapping)
 
-                for col in numeric_fields:
-                    db_col = field_mapping.get(col, col)
-                    if db_col in frame.columns:
-                        frame[db_col] = pd.to_numeric(frame[db_col], errors="coerce")
+            for col in numeric_fields:
+                db_col = field_mapping.get(col, col)
+                if db_col in frame.columns:
+                    frame[db_col] = pd.to_numeric(frame[db_col], errors="coerce")
 
-                frame.to_sql(
-                    "ForecastReports", connection, if_exists="append", index=False
-                )
-                total += len(frame)
+            frame.to_sql(
+                "ForecastReports", connection, if_exists="append", index=False
+            )
+            total += len(frame)
     logger.info(f"业绩预告更新完成，总写入 {total} 条")
 
 
@@ -791,6 +798,9 @@ def update_index_constituents(connection: sqlite3.Connection) -> None:
             (index_code, query_date),
         )
         result = query_func(query_date)
+        if result is None:
+            logger.warning(f"{index_code} 查询返回空")
+            continue
         if result.error_code != "0":
             logger.warning(f"{index_code} 查询失败: {result.error_msg}")
             continue
@@ -821,6 +831,9 @@ def update_industry(connection: sqlite3.Connection) -> None:
     today = datetime.today().strftime("%Y-%m-%d")
 
     result = bs.query_stock_industry()
+    if result is None:
+        logger.error("行业分类查询返回空")
+        return
     if result.error_code != "0":
         logger.error(f"行业分类查询失败: {result.error_msg}")
         return
@@ -919,6 +932,9 @@ def update_deposit_rates(connection: sqlite3.Connection) -> None:
     """更新存款利率。"""
     connection.execute("DELETE FROM DepositRates")
     result = bs.query_deposit_rate_data(start_date="2000-01-01")
+    if result is None:
+        logger.error("存款利率查询返回空")
+        return
     if result.error_code != "0":
         logger.error(f"存款利率查询失败: {result.error_msg}")
         return
@@ -929,11 +945,27 @@ def update_deposit_rates(connection: sqlite3.Connection) -> None:
     frame = frame.rename(
         columns={
             "pubDate": "PubDate",
-            "depositType": "DepositType",
-            "depositRate": "DepositRate",
+            "demandDepositRate": "DemandDepositRate",
+            "fixedDepositRate3Month": "FixedDepositRate3Month",
+            "fixedDepositRate6Month": "FixedDepositRate6Month",
+            "fixedDepositRate1Year": "FixedDepositRate1Year",
+            "fixedDepositRate2Year": "FixedDepositRate2Year",
+            "fixedDepositRate3Year": "FixedDepositRate3Year",
+            "fixedDepositRate5Year": "FixedDepositRate5Year",
+            "installmentFixedDepositRate1Year": "InstallmentFixedDepositRate1Year",
+            "installmentFixedDepositRate3Year": "InstallmentFixedDepositRate3Year",
+            "installmentFixedDepositRate5Year": "InstallmentFixedDepositRate5Year",
         }
     )
-    frame["DepositRate"] = pd.to_numeric(frame["DepositRate"], errors="coerce")
+    numeric_cols = [
+        "DemandDepositRate", "FixedDepositRate3Month", "FixedDepositRate6Month",
+        "FixedDepositRate1Year", "FixedDepositRate2Year", "FixedDepositRate3Year",
+        "FixedDepositRate5Year", "InstallmentFixedDepositRate1Year",
+        "InstallmentFixedDepositRate3Year", "InstallmentFixedDepositRate5Year",
+    ]
+    for col in numeric_cols:
+        if col in frame.columns:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce")
     frame.to_sql("DepositRates", connection, if_exists="append", index=False)
     logger.info(f"存款利率更新完成，共 {len(frame)} 条")
 
@@ -942,6 +974,9 @@ def update_loan_rates(connection: sqlite3.Connection) -> None:
     """更新贷款利率。"""
     connection.execute("DELETE FROM LoanRates")
     result = bs.query_loan_rate_data(start_date="2000-01-01")
+    if result is None:
+        logger.error("贷款利率查询返回空")
+        return
     if result.error_code != "0":
         logger.error(f"贷款利率查询失败: {result.error_msg}")
         return
@@ -952,11 +987,23 @@ def update_loan_rates(connection: sqlite3.Connection) -> None:
     frame = frame.rename(
         columns={
             "pubDate": "PubDate",
-            "loanType": "LoanType",
-            "loanRate": "LoanRate",
+            "loanRate6Month": "LoanRate6Month",
+            "loanRate6MonthTo1Year": "LoanRate6MonthTo1Year",
+            "loanRate1YearTo3Year": "LoanRate1YearTo3Year",
+            "loanRate3YearTo5Year": "LoanRate3YearTo5Year",
+            "loanRateAbove5Year": "LoanRateAbove5Year",
+            "mortgateRateBelow5Year": "MortgateRateBelow5Year",
+            "mortgateRateAbove5Year": "MortgateRateAbove5Year",
         }
     )
-    frame["LoanRate"] = pd.to_numeric(frame["LoanRate"], errors="coerce")
+    numeric_cols = [
+        "LoanRate6Month", "LoanRate6MonthTo1Year", "LoanRate1YearTo3Year",
+        "LoanRate3YearTo5Year", "LoanRateAbove5Year",
+        "MortgateRateBelow5Year", "MortgateRateAbove5Year",
+    ]
+    for col in numeric_cols:
+        if col in frame.columns:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce")
     frame.to_sql("LoanRates", connection, if_exists="append", index=False)
     logger.info(f"贷款利率更新完成，共 {len(frame)} 条")
 
@@ -965,6 +1012,9 @@ def update_reserve_ratios(connection: sqlite3.Connection) -> None:
     """更新存款准备金率。"""
     connection.execute("DELETE FROM ReserveRatios")
     result = bs.query_required_reserve_ratio_data(start_date="2000-01-01")
+    if result is None:
+        logger.error("准备金率查询返回空")
+        return
     if result.error_code != "0":
         logger.error(f"准备金率查询失败: {result.error_msg}")
         return
@@ -976,11 +1026,17 @@ def update_reserve_ratios(connection: sqlite3.Connection) -> None:
         columns={
             "pubDate": "PubDate",
             "effectiveDate": "EffectiveDate",
-            "deposit": "DepositRate",
-            "smallDeposit": "SmallDepositRate",
+            "bigInstitutionsRatioPre": "BigInstitutionsRatioPre",
+            "bigInstitutionsRatioAfter": "BigInstitutionsRatioAfter",
+            "mediumInstitutionsRatioPre": "MediumInstitutionsRatioPre",
+            "mediumInstitutionsRatioAfter": "MediumInstitutionsRatioAfter",
         }
     )
-    for col in ("DepositRate", "SmallDepositRate"):
+    numeric_cols = [
+        "BigInstitutionsRatioPre", "BigInstitutionsRatioAfter",
+        "MediumInstitutionsRatioPre", "MediumInstitutionsRatioAfter",
+    ]
+    for col in numeric_cols:
         if col in frame.columns:
             frame[col] = pd.to_numeric(frame[col], errors="coerce")
     frame.to_sql("ReserveRatios", connection, if_exists="append", index=False)
@@ -994,6 +1050,9 @@ def update_money_supply(connection: sqlite3.Connection) -> None:
     result = bs.query_money_supply_data_month(
         start_date="2000-01", end_date=end_month
     )
+    if result is None:
+        logger.error("货币供应量查询返回空")
+        return
     if result.error_code != "0":
         logger.error(f"货币供应量查询失败: {result.error_msg}")
         return
