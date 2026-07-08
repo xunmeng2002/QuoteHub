@@ -192,7 +192,7 @@ CREATE TABLE IF NOT EXISTS DividendData (
     DividStocksPs         REAL,   -- 每股转增股
     DividCashStock        REAL,   -- 每股送股
     DividReserveToStockPs REAL,   -- 每股转增资本公积金
-    CONSTRAINT PkDividendData PRIMARY KEY (Code, Year, YearType)
+    CONSTRAINT PkDividendData PRIMARY KEY (Code, DividOperateDate)
 );
 
 -- ----------------------------------------------------------------

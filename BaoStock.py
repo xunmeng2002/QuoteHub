@@ -593,9 +593,25 @@ def update_dividend_data(
         today = datetime.today()
         years = list(range(today.year - 3, today.year + 1))
 
+    column_map = {
+        "code": "Code",
+        "dividPreNoticeDate": "DividPreNoticeDate",
+        "dividAgmPumDate": "DividAgmPumDate",
+        "dividPlanAnnounceDate": "DividPlanAnnounceDate",
+        "dividPlanDate": "DividPlanDate",
+        "dividRegistDate": "DividRegistDate",
+        "dividOperateDate": "DividOperateDate",
+        "dividPayDate": "DividPayDate",
+        "dividStockMarketDate": "DividStockMarketDate",
+        "dividCashPsBeforeTax": "DividCashPsBeforeTax",
+        "dividCashPsAfterTax": "DividCashPsAfterTax",
+        "dividStocksPs": "DividStocksPs",
+        "dividCashStock": "DividCashStock",
+        "dividReserveToStockPs": "DividReserveToStockPs",
+    }
     numeric_fields = [
-        "dividCashPsBeforeTax", "dividCashPsAfterTax", "dividStocksPs",
-        "dividCashStock", "dividReserveToStockPs",
+        "DividCashPsBeforeTax", "DividCashPsAfterTax", "DividStocksPs",
+        "DividCashStock", "DividReserveToStockPs",
     ]
 
     total = 0
@@ -618,7 +634,7 @@ def update_dividend_data(
                 frame = pd.DataFrame(rows, columns=result.fields)
                 frame["Year"] = year
                 frame["YearType"] = year_type
-                frame = frame.rename(columns={"code": "Code"})
+                frame = frame.rename(columns=column_map)
                 for col in numeric_fields:
                     if col in frame.columns:
                         frame[col] = pd.to_numeric(frame[col], errors="coerce")

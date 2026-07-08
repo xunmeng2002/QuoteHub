@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS DividendData (
     DividStocksPs         REAL,
     DividCashStock        REAL,
     DividReserveToStockPs REAL,
-    CONSTRAINT PkDividendData PRIMARY KEY (Code, Year, YearType)
+    CONSTRAINT PkDividendData PRIMARY KEY (Code, DividOperateDate)
 );
 
 -- ===================================================================
