@@ -466,6 +466,14 @@ def _fetch_and_store_financial(
     frame = pd.DataFrame(rows, columns=result.fields)
     frame["Year"] = year
     frame["Quarter"] = quarter
+    # 字段映射：Baostock 蛇形命名 → 数据库 PascalCase
+    frame = frame.rename(
+        columns={
+            "code": "Code",
+            "pubDate": "PubDate",
+            "statDate": "StatDate",
+        }
+    )
 
     for col in numeric_fields:
         if col in frame.columns:
@@ -552,7 +560,7 @@ def update_financial_data(
             bs.query_dupont_data,
             "DuPontData",
             [
-                "dupontROE", "dupontAssetSto498", "dupontAssetTurn",
+                "dupontROE", "dupontAssetStoEquity", "dupontAssetTurn",
                 "dupontPnitoni", "dupontNitogr", "dupontTaxBurden",
                 "dupontIntburden", "dupontEbittogr",
             ],
@@ -610,6 +618,7 @@ def update_dividend_data(
                 frame = pd.DataFrame(rows, columns=result.fields)
                 frame["Year"] = year
                 frame["YearType"] = year_type
+                frame = frame.rename(columns={"code": "Code"})
                 for col in numeric_fields:
                     if col in frame.columns:
                         frame[col] = pd.to_numeric(frame[col], errors="coerce")
@@ -638,8 +647,19 @@ def update_performance_express(
         year_list = years
         quarter_list = quarters
 
-    numeric_fields = ["revenue", "deductedNP", "netProfit", "epsChgPct", "roeChgPct"]
     total = 0
+
+    column_map = {
+        "code": "Code",
+        "performanceExpPubDate": "PubDate",
+        "performanceExpStatDate": "StatDate",
+        "performanceExpRevenue": "Revenue",
+        "performanceExpDeductedNP": "DeductedNP",
+        "performanceExpNetProfit": "NetProfit",
+        "performanceExpEPSChgPct": "EPSChgPct",
+        "performanceExpROEChgPct": "ROEChgPct",
+    }
+    numeric_fields = ["Revenue", "DeductedNP", "NetProfit", "EPSChgPct", "ROEChgPct"]
 
     for code in stock_codes:
         for year in year_list:
@@ -657,6 +677,7 @@ def update_performance_express(
                 frame = pd.DataFrame(rows, columns=result.fields)
                 frame["Year"] = year
                 frame["Quarter"] = quarter
+                frame = frame.rename(columns=column_map)
                 for col in numeric_fields:
                     if col in frame.columns:
                         frame[col] = pd.to_numeric(frame[col], errors="coerce")
@@ -690,6 +711,7 @@ def update_forecast_reports(
     total = 0
 
     field_mapping = {
+        "code": "Code",
         "profitForcastExpPubDate": "PubDate",
         "profitForcastExpStatDate": "StatDate",
         "profitForcastType": "ForecastType",
@@ -762,6 +784,10 @@ def update_index_constituents(connection: sqlite3.Connection) -> None:
         frame = pd.DataFrame(rows, columns=result.fields)
         frame["IndexCode"] = index_code
         frame["UpdateDate"] = query_date
+        # Baostock 返回 code/code_name → 数据库 Code/CodeName
+        frame = frame.rename(
+            columns={"code": "Code", "code_name": "CodeName"}
+        )
         frame.to_sql("IndexConstituents", connection, if_exists="append", index=False)
         total += len(frame)
         logger.info(f"{index_code} 成分股 {len(frame)} 只")
@@ -790,6 +816,15 @@ def update_industry(connection: sqlite3.Connection) -> None:
 
     frame = pd.DataFrame(rows, columns=result.fields)
 
+    # 字段映射：Baostock 蛇形命名 → 数据库 PascalCase
+    column_map = {
+        "code": "Code",
+        "code_name": "CodeName",
+        "industry": "Industry",
+        "industryClassification": "IndustryClassification",
+    }
+    frame = frame.rename(columns=column_map)
+
     # 写入行业分类表
     connection.execute(
         "DELETE FROM IndustryClassification WHERE UpdateDate=?", (today,)
@@ -806,10 +841,10 @@ def update_industry(connection: sqlite3.Connection) -> None:
             "UPDATE Securities SET IndustryCode=?, IndustryName=?, UpdatedAt=? "
             "WHERE Code=?",
             (
-                row.get("industry", ""),
-                row.get("industryClassification", ""),
+                row.get("Industry", ""),
+                row.get("IndustryClassification", ""),
                 today,
-                row["code"],
+                row["Code"],
             ),
         )
         updated_count += 1

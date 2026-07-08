@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS DuPontData (
     PubDate           TEXT,
     StatDate          TEXT,
     DupontROE         REAL,
-    DupontAssetSto498 REAL,
+    DupontAssetStoEquity REAL,
     DupontAssetTurn   REAL,
     DupontPnitoni     REAL,
     DupontNitogr      REAL,

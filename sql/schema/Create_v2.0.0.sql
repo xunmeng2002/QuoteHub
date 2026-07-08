@@ -162,7 +162,7 @@ CREATE TABLE IF NOT EXISTS DuPontData (
     PubDate           TEXT,
     StatDate          TEXT,
     DupontROE         REAL,  -- 净资产收益率
-    DupontAssetSto498 REAL,  -- 权益乘数（资产/权益）
+    DupontAssetStoEquity REAL,  -- 权益乘数（资产/权益）
     DupontAssetTurn   REAL,  -- 资产周转率
     DupontPnitoni     REAL,  -- 净利润/利润总额
     DupontNitogr      REAL,  -- 利润总额/息税前利润
