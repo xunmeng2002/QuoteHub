@@ -1,31 +1,40 @@
-"""BaoStock 分钟线 → QuantTrading 回测 Bar Parquet 导出器。
+"""BaoStock 分钟线 → SQLite → QuantTrading 回测 Bar Parquet 管线。
 
-将 BaoStock 的 5/15/30/60 分钟 K 线（股票）转换为 QuantTrading 回测引擎
-（D:\\Gitee\\QuantTrading）Bar 撮合模式消费的 Parquet 文件：
+数据流：BaoStock 只读增量拉取 → SQLite（stock_data.db，唯一事实源）→ 三代 Parquet 文件：
 
-    <output_root>/Bar/Identity=<EXCH>.Stock/Year=<YYYY>/<YYYY>_0.parquet
+    <output_root>/Bar/Identity=<EXCH>.Stock/Year=<YYYY>/
+        YYYYMMDD_<freq>m.parquet   日度：update 每个交易日新增一个文件（Parquet 不可修改，当月只增不改）
+        YYYYMM_<freq>m.parquet     月度：merge-month 于次月初从库导出整月，日度文件移入 archive/
+        YYYY_<freq>m.parquet       年度：merge-year 于次年初从库导出整年，月度/日度文件移入 archive/
+        archive/                   被合并取代的上一代文件（回测 glob Year=*/*.parquet 不扫描，不删除）
 
-列名与类型逐一对齐既有数据（D:\\Md\\Bar\\Identity=CFFEX.IF，int64 时间戳、
-decimal128(24,8) 价格、ZSTD 压缩）；QuantTrading 侧的 Bar 回放 SQL 按
-Identity=<交易所>.*/ 匹配文件且不按精度过滤，因此本导出器写入独立的
-output_root（不与既有 1m 数据混放），避免同窗口混精度重放。
+幂等性由 SQLite 主键承担：入库一律 INSERT OR REPLACE，重复拉取同一天只会有最后一条生效；
+Parquet 文件成为数据库的纯再导出（不做文件侧合并），从根上消除"掩码跨精度误删"问题。
 
-用法：
-    python BaoStockParquet.py                                  # 按 config.json 全量
-    python BaoStockParquet.py --start 2024-01-01 --end 2024-12-31
-    python BaoStockParquet.py --codes sh.600519,sz.000001 --output-root D:/MdBaoStock
+子命令：
+    update      增量入库并写出当日 Parquet（缺省从库中最后交易日续传，含当日重拉自愈）
+    merge-month [--month YYYYMM]   缺省上月：整月导出 + 归档日度文件
+    merge-year  [--year YYYY]      缺省去年：整年导出 + 归档月度/日度文件
+    backfill --start --end         区间入库并直接写出年度 Parquet（不产生日度文件）
 
 注意：
     - BaoStock 仅有 5/15/30/60 分钟线，指数无分钟线，无 tick/1 分钟/盘口。
+    - 文件名带频率后缀（_5m）：四种频率可并存于同一目录，回测按 Identity 目录 + 日期过滤。
     - 股票回测需在 QuantTrading 的 BackTest.json 中将 MdDataPath 指向 output_root，
       ExchangeID 用 SSE/SZSE，InstrumentID 用 6 位代码（如 600519）。
+    - SQLite 路径复用 BaoStock.DB_PATH（stock_data.db），须在 QuoteHub 目录下运行；
+      建表由 BaoStock.init_database 自动应用（sql/upgrades/Update_v2.1.0.sql）。
 """
 
 import argparse
+import calendar
+import fnmatch
 import json
 import logging
 import os
+import sqlite3
 import time
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -34,7 +43,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from BaoStock import _collect_rows, login_with_retry
+from BaoStock import DB_PATH, _collect_rows, init_database, login_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +83,8 @@ BAR_PARQUET_SCHEMA = pa.schema([
     ("UnderlyingID", pa.string()),
 ])
 
+DECIMAL_COLUMNS = [field.name for field in BAR_PARQUET_SCHEMA if pa.types.is_decimal(field.type)]
+
 STOCK_EXCHANGE_PREFIXES = {"sh": "SSE", "sz": "SZSE"}
 
 
@@ -87,6 +98,30 @@ def split_stock_code(stock_code: str) -> tuple[str, str]:
     if exchange_id is None or not instrument_id:
         raise ValueError(f"无法识别的证券代码: {stock_code}（应为 sh.600519 / sz.000001 格式）")
     return exchange_id, instrument_id
+
+
+def group_codes_by_exchange(stock_codes: list[str]) -> dict[str, list[str]]:
+    """按交易所分组证券代码（同一天/月/年的文件按交易所聚合全部代码）。"""
+    codes_by_exchange: dict[str, list[str]] = {}
+    for stock_code in stock_codes:
+        exchange_id, _ = split_stock_code(stock_code)
+        codes_by_exchange.setdefault(exchange_id, []).append(stock_code)
+    return codes_by_exchange
+
+
+def to_sqlite_value(value: Any) -> Any:
+    """NaN 一律转 None（SQLite 将 NaN 存为 NULL，显式转换避免依赖该隐式行为）。"""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    return value
+
+
+def load_config(config_file: str) -> dict[str, Any]:
+    with open(config_file, "r", encoding="utf-8") as config_handle:
+        return json.load(config_handle)
+
+
+# ---------- BaoStock 拉取 ----------
 
 
 def query_minute_bars(
@@ -146,6 +181,98 @@ def detect_cumulative_mode(bar_values: list[float], daily_total: float) -> bool:
     monotonic = all(bar_values[i] <= bar_values[i + 1] for i in range(len(bar_values) - 1))
     tolerance = max(1.0, abs(daily_total) * 1e-6)
     return monotonic and abs(bar_values[-1] - daily_total) <= tolerance
+
+
+# ---------- SQLite 入库 / 读取（事实源） ----------
+
+
+def connect_database() -> sqlite3.Connection:
+    connection = sqlite3.connect(DB_PATH)
+    init_database(connection)
+    return connection
+
+
+def upsert_minute_bars(connection: sqlite3.Connection, stock_code: str, frequency: str, minute_frame: pd.DataFrame) -> None:
+    """分钟 bar 原始值入库，主键（Code, Frequency, Time）保证重复拉取幂等。"""
+    records = [
+        (
+            stock_code, frequency, row.date, row.time,
+            to_sqlite_value(row.open), to_sqlite_value(row.high),
+            to_sqlite_value(row.low), to_sqlite_value(row.close),
+            to_sqlite_value(row.volume), to_sqlite_value(row.amount),
+        )
+        for row in minute_frame.itertuples(index=False)
+    ]
+    connection.executemany(
+        "INSERT OR REPLACE INTO MinuteBars "
+        "(Code, Frequency, TradingDay, Time, Open, High, Low, Close, Volume, Amount) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        records,
+    )
+
+
+def upsert_trading_day_stats(connection: sqlite3.Connection, stock_code: str, daily_frame: pd.DataFrame) -> None:
+    """日度统计（preclose/volume/amount）入库，主键（Code, TradingDay）保证幂等。"""
+    stats_frame = daily_frame.reset_index()
+    records = [
+        (stock_code, row.date, to_sqlite_value(row.preclose), to_sqlite_value(row.volume), to_sqlite_value(row.amount))
+        for row in stats_frame.itertuples(index=False)
+    ]
+    connection.executemany(
+        "INSERT OR REPLACE INTO MinuteBarTradingDays (Code, TradingDay, Preclose, Volume, Amount) VALUES (?, ?, ?, ?, ?)",
+        records,
+    )
+
+
+def ingest_stock(
+    connection: sqlite3.Connection,
+    stock_code: str,
+    frequency: str,
+    start_date: str,
+    end_date: str,
+) -> list[str]:
+    """拉取单只股票区间数据并入库，返回有分钟数据的交易日（'YYYY-MM-DD' 升序）。"""
+    minute_frame = query_minute_bars(stock_code, start_date, end_date, frequency)
+    daily_frame = query_daily_bars(stock_code, start_date, end_date)
+    upsert_minute_bars(connection, stock_code, frequency, minute_frame)
+    upsert_trading_day_stats(connection, stock_code, daily_frame)
+    connection.commit()
+    logger.info(f"{stock_code} 入库 {len(minute_frame)} 根 {frequency} 分钟 bar / {len(daily_frame)} 个交易日统计（{start_date} ~ {end_date}）")
+    return sorted(minute_frame["date"].unique())
+
+
+def get_last_trading_day(connection: sqlite3.Connection, stock_code: str, frequency: str) -> str | None:
+    """库中该合约最后有分钟数据的交易日；无数据返回 None。"""
+    row = connection.execute(
+        "SELECT MAX(Time) FROM MinuteBars WHERE Code = ? AND Frequency = ?",
+        (stock_code, frequency),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return datetime.strptime(row[0][:8], "%Y%m%d").date().isoformat()
+
+
+def load_minute_bars(connection: sqlite3.Connection, stock_code: str, frequency: str, start_day: str, end_day: str) -> pd.DataFrame:
+    """按交易日区间读回分钟 bar（列名对齐 BaoStock 原始帧，供 build_bar_frame 复用）。"""
+    return pd.read_sql_query(
+        "SELECT TradingDay AS date, Time AS time, Open AS open, High AS high, Low AS low, "
+        "Close AS close, Volume AS volume, Amount AS amount "
+        "FROM MinuteBars WHERE Code = ? AND Frequency = ? AND TradingDay >= ? AND TradingDay <= ? ORDER BY Time",
+        connection, params=(stock_code, frequency, start_day, end_day),
+    )
+
+
+def load_trading_day_stats(connection: sqlite3.Connection, stock_code: str, start_day: str, end_day: str) -> pd.DataFrame:
+    """按交易日区间读回日度统计（索引对齐 query_daily_bars 输出）。"""
+    stats_frame = pd.read_sql_query(
+        "SELECT TradingDay AS date, Preclose AS preclose, Volume AS volume, Amount AS amount "
+        "FROM MinuteBarTradingDays WHERE Code = ? AND TradingDay >= ? AND TradingDay <= ? ORDER BY TradingDay",
+        connection, params=(stock_code, start_day, end_day),
+    )
+    return stats_frame.set_index("date")
+
+
+# ---------- Bar 行构建（与旧版一致：原始量额 → 累计/增量语义映射） ----------
 
 
 def build_bar_frame(
@@ -216,9 +343,6 @@ def build_bar_frame(
     return pd.DataFrame(rows, columns=[field.name for field in BAR_PARQUET_SCHEMA])
 
 
-DECIMAL_COLUMNS = [field.name for field in BAR_PARQUET_SCHEMA if pa.types.is_decimal(field.type)]
-
-
 def to_decimal_series(series: pd.Series) -> pd.Series:
     """将 float/Decimal/None 混合列统一为 Decimal（pyarrow 的 float→decimal128 cast 不支持，需显式转换）。"""
     def convert(value: Any) -> Decimal | None:
@@ -231,80 +355,248 @@ def to_decimal_series(series: pd.Series) -> pd.Series:
     return series.map(convert)
 
 
-def merge_write_year_file(year_file: str, new_frame: pd.DataFrame, start_trading_day: int, end_trading_day: int) -> int:
-    """幂等写入年度文件：覆盖同 InstrumentID + 日期段的旧行后追加，按（UpdateTs, InstrumentID）排序。"""
-    instrument_ids = set(new_frame["InstrumentID"])
-    if os.path.exists(year_file):
-        existing_frame = pq.read_table(year_file).to_pandas()
-        mask = (
-            existing_frame["InstrumentID"].isin(instrument_ids)
-            & (existing_frame["TradingDay"] >= start_trading_day)
-            & (existing_frame["TradingDay"] <= end_trading_day)
-        )
-        existing_frame = existing_frame[~mask]
-        merged_frame = pd.concat([existing_frame, new_frame], ignore_index=True)
-    else:
-        merged_frame = new_frame
-    merged_frame = merged_frame.sort_values(["UpdateTs", "InstrumentID"]).reset_index(drop=True)
+# ---------- Parquet 写出 / 归档 ----------
+
+
+def bar_file_path(output_root: str, exchange_id: str, period: str, frequency: str) -> str:
+    """三代文件共用命名：period 为 'YYYY'（年）/ 'YYYYMM'（月）/ 'YYYYMMDD'（日），频率作后缀。"""
+    return os.path.join(output_root, "Bar", f"Identity={exchange_id}.Stock", f"Year={period[:4]}", f"{period}_{frequency}m.parquet")
+
+
+def write_bar_file(parquet_file: str, bar_frame: pd.DataFrame) -> None:
+    """排序 + Decimal 化后按既有 schema 写单文件（纯数据库再导出，不做文件侧合并）。"""
+    ordered_frame = bar_frame.sort_values(["UpdateTs", "InstrumentID"]).reset_index(drop=True)
     for column in DECIMAL_COLUMNS:
-        merged_frame[column] = to_decimal_series(merged_frame[column])
-    os.makedirs(os.path.dirname(year_file), exist_ok=True)
-    table = pa.Table.from_pandas(merged_frame, schema=BAR_PARQUET_SCHEMA, preserve_index=False)
-    pq.write_table(table, year_file, compression="zstd")
-    return len(merged_frame)
+        ordered_frame[column] = to_decimal_series(ordered_frame[column])
+    os.makedirs(os.path.dirname(parquet_file), exist_ok=True)
+    table = pa.Table.from_pandas(ordered_frame, schema=BAR_PARQUET_SCHEMA, preserve_index=False)
+    pq.write_table(table, parquet_file, compression="zstd")
 
 
-# ---------- 导出入口 ----------
+def archive_file(file_path: str) -> None:
+    """将上一代文件移入同目录 archive/（重命名而非删除；回测 glob 不扫描 archive 层）。"""
+    archive_dir = os.path.join(os.path.dirname(file_path), "archive")
+    os.makedirs(archive_dir, exist_ok=True)
+    target_path = os.path.join(archive_dir, os.path.basename(file_path))
+    if os.path.exists(target_path):
+        logger.warning(f"archive 内已存在同名文件，两侧均保留不动: {target_path}")
+        return
+    os.rename(file_path, target_path)
+    logger.info(f"归档 {file_path} → {target_path}")
 
 
-def export_baostock_bar_parquet(
-    stock_codes: list[str],
-    start_date: str,
-    end_date: str,
+def archive_matching_files(directory: str, patterns: list[str]) -> None:
+    """将目录顶层匹配 glob 模式的文件归档（合并命令在写出新文件后调用）。"""
+    if not patterns or not os.path.isdir(directory):
+        return
+    for file_name in os.listdir(directory):
+        file_path = os.path.join(directory, file_name)
+        if not os.path.isfile(file_path):
+            continue
+        if any(fnmatch.fnmatch(file_name, pattern) for pattern in patterns):
+            archive_file(file_path)
+
+
+def warn_coverage_shrink(
+    connection: sqlite3.Connection,
+    frequency: str,
+    start_day: str,
+    end_day: str,
+    target_file: str,
+) -> None:
+    """重写既有文件前检查覆盖收缩（仅告警不阻断）：
+    1) 既有 span 超出本次导出区间——重写后文件范围变窄；
+    2) 库中该频率在该区间完全没有既有文件两端的天数——重写将丢失库外天数。
+    """
+    if not os.path.exists(target_file):
+        return
+    existing_days = pq.read_table(target_file, columns=["TradingDay"]).column("TradingDay").to_pylist()
+    if not existing_days:
+        return
+    existing_min, existing_max = min(existing_days), max(existing_days)
+    period_min = int(start_day.replace("-", ""))
+    period_max = int(end_day.replace("-", ""))
+    if existing_min < period_min or existing_max > period_max:
+        logger.warning(f"{target_file} 既有覆盖 {existing_min}~{existing_max} 超出本次导出区间 {period_min}~{period_max}，重写将收缩范围")
+    row = connection.execute(
+        "SELECT MIN(TradingDay), MAX(TradingDay) FROM MinuteBars WHERE Frequency = ? AND TradingDay >= ? AND TradingDay <= ?",
+        (frequency, start_day, end_day),
+    ).fetchone()
+    if row[0] is None:
+        return
+    database_min = int(row[0].replace("-", ""))
+    database_max = int(row[1].replace("-", ""))
+    if existing_min < database_min or existing_max > database_max:
+        logger.warning(f"{target_file} 既有覆盖 {existing_min}~{existing_max} 超出库中数据 {database_min}~{database_max}，重写将丢失库外天数")
+
+
+# ---------- 导出（数据库 → Parquet，唯一出口） ----------
+
+
+def export_bars_from_database(
+    connection: sqlite3.Connection,
     output_root: str,
     frequency: str,
+    exchange_id: str,
+    stock_codes: list[str],
+    start_day: str,
+    end_day: str,
+    period: str,
+    archive_patterns: list[str],
 ) -> None:
-    """逐合约下载并转换，按（交易所, 年份）聚合后写入年度 Parquet 文件。"""
-    preces = f"{frequency}m"
-    frames_by_year: dict[tuple[str, str], list[pd.DataFrame]] = {}
+    """从库导出 [start_day, end_day] 全部代码到 period 命名文件；写出后归档匹配的上一代文件。"""
+    frames: list[pd.DataFrame] = []
     for stock_code in stock_codes:
-        exchange_id, instrument_id = split_stock_code(stock_code)
-        logger.info(f"下载 {stock_code} {start_date} ~ {end_date} frequency={frequency}")
-        minute_frame = query_minute_bars(stock_code, start_date, end_date, frequency)
+        minute_frame = load_minute_bars(connection, stock_code, frequency, start_day, end_day)
         if minute_frame.empty:
-            logger.warning(f"{stock_code} 区间内无分钟数据，跳过")
             continue
-        daily_frame = query_daily_bars(stock_code, start_date, end_date)
-        bar_frame = build_bar_frame(minute_frame, daily_frame, exchange_id, instrument_id, preces)
-        logger.info(f"{stock_code} 转换得到 {len(bar_frame)} 根 bar")
-        for trading_year, year_frame in bar_frame.groupby(bar_frame["TradingDay"] // 10000):
-            frames_by_year.setdefault((exchange_id, str(trading_year)), []).append(year_frame)
+        stats_frame = load_trading_day_stats(connection, stock_code, start_day, end_day)
+        _, instrument_id = split_stock_code(stock_code)
+        frames.append(build_bar_frame(minute_frame, stats_frame, exchange_id, instrument_id, f"{frequency}m"))
+    if not frames:
+        logger.warning(f"{exchange_id} {start_day} ~ {end_day} 库中无 {frequency} 分钟数据，跳过导出")
+        return
+    merged_frame = pd.concat(frames, ignore_index=True)
+    target_file = bar_file_path(output_root, exchange_id, period, frequency)
+    warn_coverage_shrink(connection, frequency, start_day, end_day, target_file)
+    write_bar_file(target_file, merged_frame)
+    logger.info(f"写入 {target_file}（{len(merged_frame)} 行，{start_day} ~ {end_day}）")
+    archive_matching_files(os.path.dirname(target_file), archive_patterns)
 
-    for (exchange_id, trading_year), frames in sorted(frames_by_year.items()):
-        year_file = os.path.join(output_root, "Bar", f"Identity={exchange_id}.Stock", f"Year={trading_year}", f"{trading_year}_0.parquet")
-        merged_frame = pd.concat(frames, ignore_index=True)
-        start_trading_day = int(start_date.replace("-", ""))
-        end_trading_day = int(end_date.replace("-", ""))
-        row_count = merge_write_year_file(year_file, merged_frame, start_trading_day, end_trading_day)
-        logger.info(f"写入 {year_file}（共 {row_count} 行）")
+
+# ---------- 子命令 ----------
 
 
-def load_config(config_file: str) -> dict[str, Any]:
-    with open(config_file, "r", encoding="utf-8") as config_handle:
-        return json.load(config_handle)
+def run_update(
+    connection: sqlite3.Connection,
+    stock_codes: list[str],
+    frequency: str,
+    output_root: str,
+    start_date: str | None,
+    end_date: str,
+    default_start_date: str,
+) -> None:
+    """增量入库并按日写出 Parquet。续传起点为库中最后交易日本身（当日重拉自愈半截数据，
+    幂等由主键保证）；显式 --start 时对所有代码强制从该日起拉取。"""
+    codes_by_exchange = group_codes_by_exchange(stock_codes)
+    trading_days_by_exchange: dict[str, set[str]] = {}
+    for stock_code in stock_codes:
+        effective_start = start_date or get_last_trading_day(connection, stock_code, frequency) or default_start_date
+        if effective_start > end_date:
+            logger.info(f"{stock_code} 已是最新（库中最后交易日 {effective_start} 不早于 {end_date}），跳过")
+            continue
+        trading_days = ingest_stock(connection, stock_code, frequency, effective_start, end_date)
+        exchange_id, _ = split_stock_code(stock_code)
+        trading_days_by_exchange.setdefault(exchange_id, set()).update(trading_days)
+
+    for exchange_id, trading_days in sorted(trading_days_by_exchange.items()):
+        for trading_day in sorted(trading_days):
+            export_bars_from_database(
+                connection, output_root, frequency, exchange_id, codes_by_exchange[exchange_id],
+                trading_day, trading_day, trading_day.replace("-", ""), archive_patterns=[],
+            )
+
+
+def get_last_month() -> str:
+    last_month_last_day = datetime.today().replace(day=1) - timedelta(days=1)
+    return last_month_last_day.strftime("%Y%m")
+
+
+def run_merge_month(
+    connection: sqlite3.Connection,
+    stock_codes: list[str],
+    frequency: str,
+    output_root: str,
+    month: str,
+) -> None:
+    """整月导出为月度文件，归档该月全部日度文件。"""
+    year = int(month[:4])
+    month_number = int(month[4:6])
+    period_start = f"{year}-{month_number:02d}-01"
+    period_end = f"{year}-{month_number:02d}-{calendar.monthrange(year, month_number)[1]:02d}"
+    # '202409[0-9][0-9]_5m.parquet' 精确匹配该月 8 位日度文件（年/月文件名位数不同不会被误归档）
+    archive_patterns = [f"{month}[0-9][0-9]_{frequency}m.parquet"]
+    for exchange_id, exchange_codes in group_codes_by_exchange(stock_codes).items():
+        export_bars_from_database(
+            connection, output_root, frequency, exchange_id, exchange_codes,
+            period_start, period_end, month, archive_patterns,
+        )
+
+
+def run_merge_year(
+    connection: sqlite3.Connection,
+    stock_codes: list[str],
+    frequency: str,
+    output_root: str,
+    year: str,
+) -> None:
+    """整年导出为年度文件，归档该年全部月度文件与残留日度文件。"""
+    # '2024[0-9][0-9]_5m.parquet' 同时命中 6 位月度与 8 位日度文件（年份后必须跟数字，
+    # 年度文件自身 '2024_5m.parquet' 不会命中）
+    archive_patterns = [f"{year}[0-9][0-9]_{frequency}m.parquet"]
+    for exchange_id, exchange_codes in group_codes_by_exchange(stock_codes).items():
+        export_bars_from_database(
+            connection, output_root, frequency, exchange_id, exchange_codes,
+            f"{year}-01-01", f"{year}-12-31", year, archive_patterns,
+        )
+
+
+def run_backfill(
+    connection: sqlite3.Connection,
+    stock_codes: list[str],
+    frequency: str,
+    output_root: str,
+    start_date: str,
+    end_date: str,
+) -> None:
+    """区间入库并直接写出年度 Parquet（历史回补不产生日度文件）；仅触及回补区间相交的年份。"""
+    for stock_code in stock_codes:
+        ingest_stock(connection, stock_code, frequency, start_date, end_date)
+    for exchange_id, exchange_codes in group_codes_by_exchange(stock_codes).items():
+        placeholders = ", ".join("?" * len(exchange_codes))
+        year_rows = connection.execute(
+            f"SELECT DISTINCT substr(TradingDay, 1, 4) FROM MinuteBars "
+            f"WHERE Frequency = ? AND TradingDay >= ? AND TradingDay <= ? AND Code IN ({placeholders}) ORDER BY 1",
+            [frequency, start_date, end_date, *exchange_codes],
+        ).fetchall()
+        for (year,) in year_rows:
+            export_bars_from_database(
+                connection, output_root, frequency, exchange_id, exchange_codes,
+                f"{year}-01-01", f"{year}-12-31", year, archive_patterns=[],
+            )
 
 
 # ---------- 命令行入口 ----------
 
 
 def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="BaoStock 分钟线 → QuantTrading Bar Parquet 导出器")
-    parser.add_argument("--config", default=CONFIG_FILE, help="配置文件路径（提供 stocks 与 default_start_date）")
-    parser.add_argument("--codes", default=None, help="逗号分隔的证券代码，缺省取配置文件 stocks")
-    parser.add_argument("--start", default=None, help="起始日期 YYYY-MM-DD，缺省取配置 default_start_date")
-    parser.add_argument("--end", default=None, help="结束日期 YYYY-MM-DD，缺省取今天")
-    parser.add_argument("--output-root", default=None, help="Parquet 输出根目录，缺省取配置 parquet_output_root 或 D:/MdBaoStock")
-    parser.add_argument("--frequency", default=DEFAULT_FREQUENCY, choices=["5", "15", "30", "60"], help="分钟频率")
+    parser = argparse.ArgumentParser(description="BaoStock 分钟线 → SQLite → QuantTrading Bar Parquet 管线")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    def add_common_arguments(sub_parser: argparse.ArgumentParser) -> None:
+        sub_parser.add_argument("--config", default=CONFIG_FILE, help="配置文件路径（提供 stocks / default_start_date / parquet_output_root）")
+        sub_parser.add_argument("--codes", default=None, help="逗号分隔的证券代码，缺省取配置文件 stocks")
+        sub_parser.add_argument("--frequency", default=DEFAULT_FREQUENCY, choices=["5", "15", "30", "60"], help="分钟频率")
+        sub_parser.add_argument("--output-root", default=None, help="Parquet 输出根目录，缺省取配置 parquet_output_root 或 D:/MdBaoStock")
+
+    update_parser = subparsers.add_parser("update", help="增量入库并写出当日 Parquet 文件")
+    add_common_arguments(update_parser)
+    update_parser.add_argument("--start", default=None, help="起始日期 YYYY-MM-DD，缺省从库中最后交易日续传")
+    update_parser.add_argument("--end", default=None, help="结束日期 YYYY-MM-DD，缺省取今天")
+
+    month_parser = subparsers.add_parser("merge-month", help="从库导出上月整月 Parquet 并归档日度文件")
+    add_common_arguments(month_parser)
+    month_parser.add_argument("--month", default=None, help="月份 YYYYMM，缺省取上月")
+
+    year_parser = subparsers.add_parser("merge-year", help="从库导出去年整年 Parquet 并归档月度/日度文件")
+    add_common_arguments(year_parser)
+    year_parser.add_argument("--year", default=None, help="年份 YYYY，缺省取去年")
+
+    backfill_parser = subparsers.add_parser("backfill", help="区间入库并直接写出年度 Parquet（不产生日度文件）")
+    add_common_arguments(backfill_parser)
+    backfill_parser.add_argument("--start", required=True, help="起始日期 YYYY-MM-DD")
+    backfill_parser.add_argument("--end", default=None, help="结束日期 YYYY-MM-DD，缺省取今天")
+
     return parser.parse_args()
 
 
@@ -312,17 +604,35 @@ def main() -> None:
     arguments = parse_arguments()
     config = load_config(arguments.config)
     stock_codes = arguments.codes.split(",") if arguments.codes else config["stocks"]
-    start_date = arguments.start or config.get("default_start_date", "2015-01-01")
-    end_date = arguments.end or time.strftime("%Y-%m-%d")
     output_root = arguments.output_root or config.get("parquet_output_root", DEFAULT_OUTPUT_ROOT)
-    logger.info(f"导出 {stock_codes} {start_date} ~ {end_date} → {output_root} frequency={arguments.frequency}")
+    frequency = arguments.frequency
+    default_start_date = config.get("default_start_date", "2015-01-01")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-    if login_with_retry() is None:
-        raise SystemExit("BaoStock 登录失败")
+    connection = connect_database()
+    logged_in = False
     try:
-        export_baostock_bar_parquet(stock_codes, start_date, end_date, output_root, arguments.frequency)
+        if arguments.command in ("update", "backfill"):
+            if login_with_retry() is None:
+                raise SystemExit("BaoStock 登录失败")
+            logged_in = True
+
+        if arguments.command == "update":
+            run_update(connection, stock_codes, frequency, output_root,
+                       arguments.start, arguments.end or time.strftime("%Y-%m-%d"), default_start_date)
+        elif arguments.command == "merge-month":
+            run_merge_month(connection, stock_codes, frequency, output_root,
+                            arguments.month or get_last_month())
+        elif arguments.command == "merge-year":
+            run_merge_year(connection, stock_codes, frequency, output_root,
+                           arguments.year or str(datetime.today().year - 1))
+        elif arguments.command == "backfill":
+            run_backfill(connection, stock_codes, frequency, output_root,
+                         arguments.start, arguments.end or time.strftime("%Y-%m-%d"))
     finally:
-        bs.logout()
+        if logged_in:
+            bs.logout()
+        connection.close()
 
 
 if __name__ == "__main__":
