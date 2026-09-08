@@ -1,6 +1,6 @@
 # BaoStock 分钟线回测数据管线使用说明
 
-`BaoStockParquet.py` 将证券宝（BaoStock）的 5/15/30/60 分钟 K 线落入 SQLite（事实源），并按日 / 月 / 年三代 Parquet 文件导出，供 QuantTrading 回测引擎的 Bar 撮合模式消费。
+`BaoStockParquet.py` 将证券宝（BaoStock）的 5/15/30/60 分钟 K 线落入 SQLite（事实源），并按日 / 月 / 年三代 Parquet 文件导出，供 QuantTrading 回测引擎的 Bar 撮合模式消费。日线与基本面数据采集（`BaoStock.py`）见 [baostock-data-collector.md](baostock-data-collector.md)。
 
 ## 目录
 
