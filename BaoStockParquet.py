@@ -282,9 +282,12 @@ def build_bar_frame(
     instrument_id: str,
     preces: str,
 ) -> pd.DataFrame:
-    """将单只股票的分钟线映射为 Bar Parquet 行（Volume/LastTraded 语义见 detect_cumulative_mode）。"""
+    """将单只股票的分钟线映射为 Bar Parquet 行（Volume/LastTraded 语义见 detect_cumulative_mode）。
+
+    返回 (bar_frame, mismatch_records)，后者为分钟量合计与日线量偏差 >1% 的交易日明细。
+    """
     rows: list[dict[str, Any]] = []
-    mismatch_days = 0
+    mismatch_records: list[dict[str, Any]] = []
     previous_close = None
     for trading_day, day_bars in minute_frame.groupby("date", sort=True):
         day_bars = day_bars.sort_values("time")
@@ -304,10 +307,18 @@ def build_bar_frame(
         volume = day_bars["volume"] if volume_cumulative else day_bars["volume"].cumsum()
         last_turnover = day_bars["amount"].diff().fillna(day_bars["amount"]) if amount_cumulative else day_bars["amount"]
         turnover = day_bars["amount"] if amount_cumulative else day_bars["amount"].cumsum()
-        # 分钟量合计与日量存在 ~0.4% 的固有口径差（大宗交易/集合竞价归属），仅对 >1% 的偏差告警
+        # 分钟量合计与日量存在 ~0.4% 的固有口径差（大宗交易/集合竞价归属），>1% 记明细，>5% 逐日告警
         if not volume_cumulative and daily_row is not None and not pd.isna(daily_row["volume"]):
-            if abs(float(volume.iloc[-1]) - float(daily_row["volume"])) > max(1.0, float(daily_row["volume"]) * 0.01):
-                mismatch_days += 1
+            daily_volume = float(daily_row["volume"])
+            minute_total = float(volume.iloc[-1])
+            if abs(minute_total - daily_volume) > max(1.0, daily_volume * 0.01):
+                mismatch_records.append({
+                    "InstrumentID": instrument_id,
+                    "TradingDay": trading_day,
+                    "MinuteVolumeSum": minute_total,
+                    "DailyVolume": daily_volume,
+                    "DeviationPercent": round((minute_total - daily_volume) / daily_volume * 100, 2),
+                })
 
         for index, (_, bar) in enumerate(day_bars.iterrows()):
             bar_pre_close = pre_close if index == 0 else closes[index - 1]
@@ -338,9 +349,7 @@ def build_bar_frame(
                 "UnderlyingID": "",
             })
         previous_close = closes[-1]
-    if mismatch_days > 0:
-        logger.warning(f"{exchange_id}.{instrument_id} 有 {mismatch_days} 天分钟量与日量对不上（请人工核对）")
-    return pd.DataFrame(rows, columns=[field.name for field in BAR_PARQUET_SCHEMA])
+    return pd.DataFrame(rows, columns=[field.name for field in BAR_PARQUET_SCHEMA]), mismatch_records
 
 
 def to_decimal_series(series: pd.Series) -> pd.Series:
@@ -397,6 +406,19 @@ def archive_matching_files(directory: str, patterns: list[str]) -> None:
             archive_file(file_path)
 
 
+def write_mismatch_report(target_file: str, period: str, frequency: str, mismatch_records: list[dict[str, Any]]) -> None:
+    """将分钟量与日线量偏差 >1% 的交易日明细写成同目录 CSV（正偏差 = 分钟多于日线），>5% 的天逐日告警。"""
+    for record in mismatch_records:
+        if abs(record["DeviationPercent"]) > 5:
+            logger.warning(f"{record['InstrumentID']} {record['TradingDay']} 分钟量与日量偏差 {record['DeviationPercent']}%，超过 5%")
+    if not mismatch_records:
+        return
+    report_file = os.path.join(os.path.dirname(target_file), f"{period}_{frequency}m_mismatch.csv")
+    report_frame = pd.DataFrame(mismatch_records).sort_values(["InstrumentID", "TradingDay"])
+    report_frame.to_csv(report_file, index=False, encoding="utf-8-sig")
+    logger.warning(f"{os.path.basename(target_file)} 共 {len(mismatch_records)} 天分钟量与日量偏差超 1%，明细见 {report_file}")
+
+
 def warn_coverage_shrink(
     connection: sqlite3.Connection,
     frequency: str,
@@ -446,13 +468,16 @@ def export_bars_from_database(
 ) -> None:
     """从库导出 [start_day, end_day] 全部代码到 period 命名文件；写出后归档匹配的上一代文件。"""
     frames: list[pd.DataFrame] = []
+    mismatch_records: list[dict[str, Any]] = []
     for stock_code in stock_codes:
         minute_frame = load_minute_bars(connection, stock_code, frequency, start_day, end_day)
         if minute_frame.empty:
             continue
         stats_frame = load_trading_day_stats(connection, stock_code, start_day, end_day)
         _, instrument_id = split_stock_code(stock_code)
-        frames.append(build_bar_frame(minute_frame, stats_frame, exchange_id, instrument_id, f"{frequency}m"))
+        bar_frame, code_mismatches = build_bar_frame(minute_frame, stats_frame, exchange_id, instrument_id, f"{frequency}m")
+        frames.append(bar_frame)
+        mismatch_records.extend(code_mismatches)
     if not frames:
         logger.warning(f"{exchange_id} {start_day} ~ {end_day} 库中无 {frequency} 分钟数据，跳过导出")
         return
@@ -461,6 +486,7 @@ def export_bars_from_database(
     warn_coverage_shrink(connection, frequency, start_day, end_day, target_file)
     write_bar_file(target_file, merged_frame)
     logger.info(f"写入 {target_file}（{len(merged_frame)} 行，{start_day} ~ {end_day}）")
+    write_mismatch_report(target_file, period, frequency, mismatch_records)
     archive_matching_files(os.path.dirname(target_file), archive_patterns)
 
 
