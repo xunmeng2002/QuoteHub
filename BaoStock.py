@@ -114,6 +114,19 @@ def init_database(connection: sqlite3.Connection) -> None:
     connection.commit()
     logger.info("数据库 Schema 初始化完成")
 
+    # 3. 旧结构一次性迁移：PerformanceExpress 旧列为臆测口径（接口无对应字段，从未写入成功），
+    #    检测到旧列即重建；升级脚本每次全量重跑且 SQL 无条件 DDL，故迁移只能放在代码侧保证幂等。
+    express_columns = {row[1] for row in connection.execute("PRAGMA table_info(PerformanceExpress)")}
+    if express_columns and "TotalAsset" not in express_columns:
+        express_count = connection.execute("SELECT COUNT(*) FROM PerformanceExpress").fetchone()[0]
+        if express_count:
+            logger.warning(f"PerformanceExpress 为旧结构且含 {express_count} 行数据，跳过自动迁移，请手工处理")
+        else:
+            connection.execute("DROP TABLE PerformanceExpress")
+            with open(os.path.join(upgrades_dir, "Update_v2.2.0.sql"), "r", encoding="utf-8") as migrate_file:
+                connection.executescript(migrate_file.read())
+            logger.info("PerformanceExpress 旧结构（空表）已重建为 v2.2.0 列定义")
+
 
 # ---------- 交易日推算 ----------
 
@@ -502,6 +515,14 @@ def _default_year_quarters() -> list[tuple[int, int]]:
     return list(reversed(quarters))
 
 
+def _quarter_window_start(quarters_back: int = 4) -> str:
+    """最近 quarters_back 个季度窗口的起始日期（最早那季的首日），供按日期区间查询的接口使用。"""
+    today = datetime.today()
+    quarter_start_month = (today.month - 1) // 3 * 3 + 1
+    total_months = today.year * 12 + quarter_start_month - quarters_back * 3
+    return f"{total_months // 12:04d}-{total_months % 12 + 1:02d}-01"
+
+
 # ------------------------------------------------------------------
 # 季频财务数据（6 类）
 # ------------------------------------------------------------------
@@ -660,56 +681,65 @@ def update_dividend_data(
 def update_performance_express(
     connection: sqlite3.Connection,
     stock_codes: list[str],
-    years: list[int] | None = None,
-    quarters: list[int] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> None:
-    """下载业绩快报。"""
-    if years is None or quarters is None:
-        yq_pairs = _default_year_quarters()
-    else:
-        yq_pairs = [(y, q) for y in years for q in quarters]
-
+    """下载业绩快报。接口按日期区间查询（非年+季），Year/Quarter 由统计日期推导。"""
+    start_date = start_date or _quarter_window_start()
+    end_date = end_date or datetime.today().strftime("%Y-%m-%d")
     total = 0
 
     column_map = {
         "code": "Code",
         "performanceExpPubDate": "PubDate",
+        "performanceExpUpdateDate": "UpdateDate",
         "performanceExpStatDate": "StatDate",
-        "performanceExpRevenue": "Revenue",
-        "performanceExpDeductedNP": "DeductedNP",
-        "performanceExpNetProfit": "NetProfit",
-        "performanceExpEPSChgPct": "EPSChgPct",
-        "performanceExpROEChgPct": "ROEChgPct",
+        "performanceExpressTotalAsset": "TotalAsset",
+        "performanceExpressNetAsset": "NetAsset",
+        "performanceExpressEPSChgPct": "EPSChgPct",
+        "performanceExpressROEWa": "ROEWa",
+        "performanceExpressEPSDiluted": "EPSDiluted",
+        "performanceExpressGRYOY": "GRYOY",
+        "performanceExpressOPYOY": "OPYOY",
     }
-    numeric_fields = ["Revenue", "DeductedNP", "NetProfit", "EPSChgPct", "ROEChgPct"]
+    numeric_fields = ["TotalAsset", "NetAsset", "EPSChgPct", "ROEWa", "EPSDiluted", "GRYOY", "OPYOY"]
+    target_columns = ["Code", "Year", "Quarter", "PubDate", "UpdateDate", "StatDate",
+                      "TotalAsset", "NetAsset", "EPSChgPct", "ROEWa", "EPSDiluted", "GRYOY", "OPYOY"]
 
     for code in stock_codes:
-        for year, quarter in yq_pairs:
-            connection.execute(
-                "DELETE FROM PerformanceExpress WHERE Code=? AND Year=? AND Quarter=?",
-                (code, year, quarter),
-            )
-            result = bs.query_performance_express_report(code, str(year), str(quarter))
-            if result is None:
-                logger.info(f"{code} 业绩快报 {year}Q{quarter} 无返回值")
-                continue
-            if result.error_code != "0":
-                continue
-            rows = _collect_rows(result)
-            if not rows:
-                continue
-            frame = pd.DataFrame(rows, columns=result.fields)
-            frame["Year"] = year
-            frame["Quarter"] = quarter
-            frame = frame.rename(columns=column_map)
-            for col in numeric_fields:
-                if col in frame.columns:
-                    frame[col] = pd.to_numeric(frame[col], errors="coerce")
-            frame.to_sql(
-                "PerformanceExpress", connection, if_exists="append", index=False
-            )
-            total += len(frame)
-    logger.info(f"业绩快报更新完成，总写入 {total} 条")
+        # 接口按公告日期过滤，会返回 StatDate 早于窗口起点的行（如 8 月公告的中报快报）；
+        # 删除范围需同时覆盖 PubDate，否则重跑触发主键冲突
+        connection.execute(
+            "DELETE FROM PerformanceExpress WHERE Code=? AND (PubDate>=? OR StatDate>=?)",
+            (code, start_date, start_date),
+        )
+        result = bs.query_performance_express_report(
+            code, start_date=start_date, end_date=end_date
+        )
+        if result is None:
+            logger.warning(f"{code} 业绩快报查询无返回值（{start_date} ~ {end_date}）")
+            continue
+        if result.error_code != "0":
+            logger.warning(f"{code} 业绩快报查询失败: {result.error_msg}")
+            continue
+        rows = _collect_rows(result)
+        if not rows:
+            continue
+        frame = pd.DataFrame(rows, columns=result.fields)
+        frame = frame.rename(columns=column_map)
+        frame["Year"] = frame["StatDate"].str[:4].astype(int)
+        frame["Quarter"] = (frame["StatDate"].str[5:7].astype(int) - 1) // 3 + 1
+        for col in numeric_fields:
+            if col in frame.columns:
+                frame[col] = pd.to_numeric(frame[col], errors="coerce")
+        # API 返回字段多于建表列，只保留目标列；同季多行（快报修订）按 PK 去重保留最新公告
+        frame = frame[[col for col in target_columns if col in frame.columns]]
+        frame = frame.drop_duplicates(subset=["Code", "Year", "Quarter"], keep="last")
+        frame.to_sql(
+            "PerformanceExpress", connection, if_exists="append", index=False
+        )
+        total += len(frame)
+    logger.info(f"业绩快报更新完成，总写入 {total} 条（{start_date} ~ {end_date}）")
 
 
 # ------------------------------------------------------------------
@@ -720,15 +750,12 @@ def update_performance_express(
 def update_forecast_reports(
     connection: sqlite3.Connection,
     stock_codes: list[str],
-    years: list[int] | None = None,
-    quarters: list[int] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> None:
-    """下载业绩预告。"""
-    if years is None or quarters is None:
-        yq_pairs = _default_year_quarters()
-    else:
-        yq_pairs = [(y, q) for y in years for q in quarters]
-
+    """下载业绩预告。接口按日期区间查询（非年+季），Year/Quarter 由统计日期推导。"""
+    start_date = start_date or _quarter_window_start()
+    end_date = end_date or datetime.today().strftime("%Y-%m-%d")
     total = 0
 
     field_mapping = {
@@ -740,38 +767,41 @@ def update_forecast_reports(
         "profitForcastChgPctUp": "ChgPctUp",
         "profitForcastChgPctDwn": "ChgPctDwn",
     }
-    numeric_fields = ["profitForcastChgPctUp", "profitForcastChgPctDwn"]
+    numeric_fields = ["ChgPctUp", "ChgPctDwn"]
+    target_columns = ["Code", "Year", "Quarter", "PubDate", "StatDate", "ForecastType", "Abstract", "ChgPctUp", "ChgPctDwn"]
 
     for code in stock_codes:
-        for year, quarter in yq_pairs:
-            connection.execute(
-                "DELETE FROM ForecastReports WHERE Code=? AND Year=? AND Quarter=?",
-                (code, year, quarter),
-            )
-            result = bs.query_forecast_report(code, str(year), str(quarter))
-            if result is None:
-                logger.info(f"{code} 业绩预告 {year}Q{quarter} 无返回值")
-                continue
-            if result.error_code != "0":
-                continue
-            rows = _collect_rows(result)
-            if not rows:
-                continue
-            frame = pd.DataFrame(rows, columns=result.fields)
-            frame["Year"] = year
-            frame["Quarter"] = quarter
-            frame = frame.rename(columns=field_mapping)
-
-            for col in numeric_fields:
-                db_col = field_mapping.get(col, col)
-                if db_col in frame.columns:
-                    frame[db_col] = pd.to_numeric(frame[db_col], errors="coerce")
-
-            frame.to_sql(
-                "ForecastReports", connection, if_exists="append", index=False
-            )
-            total += len(frame)
-    logger.info(f"业绩预告更新完成，总写入 {total} 条")
+        # 同业绩快报：接口按公告日期过滤，删除范围需同时覆盖 PubDate 保证重跑幂等
+        connection.execute(
+            "DELETE FROM ForecastReports WHERE Code=? AND (PubDate>=? OR StatDate>=?)",
+            (code, start_date, start_date),
+        )
+        result = bs.query_forecast_report(
+            code, start_date=start_date, end_date=end_date
+        )
+        if result is None:
+            logger.warning(f"{code} 业绩预告查询无返回值（{start_date} ~ {end_date}）")
+            continue
+        if result.error_code != "0":
+            logger.warning(f"{code} 业绩预告查询失败: {result.error_msg}")
+            continue
+        rows = _collect_rows(result)
+        if not rows:
+            continue
+        frame = pd.DataFrame(rows, columns=result.fields)
+        frame = frame.rename(columns=field_mapping)
+        frame["Year"] = frame["StatDate"].str[:4].astype(int)
+        frame["Quarter"] = (frame["StatDate"].str[5:7].astype(int) - 1) // 3 + 1
+        for col in numeric_fields:
+            if col in frame.columns:
+                frame[col] = pd.to_numeric(frame[col], errors="coerce")
+        # API 返回字段多于建表列，只保留目标列（同季多份预告由 PK 中的 PubDate 区分）
+        frame = frame[[col for col in target_columns if col in frame.columns]]
+        frame.to_sql(
+            "ForecastReports", connection, if_exists="append", index=False
+        )
+        total += len(frame)
+    logger.info(f"业绩预告更新完成，总写入 {total} 条（{start_date} ~ {end_date}）")
 
 
 # ------------------------------------------------------------------
