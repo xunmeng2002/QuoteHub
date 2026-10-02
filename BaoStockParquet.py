@@ -11,6 +11,10 @@
 幂等性由 SQLite 主键承担：入库一律 INSERT OR REPLACE，重复拉取同一天只会有最后一条生效；
 Parquet 文件成为数据库的纯再导出（不做文件侧合并），从根上消除"掩码跨精度误删"问题。
 
+另有一张 `QueriedBarSpans`（v2.3.0）：按「代码 + 频率」记**已向上游问成功的日区间**，供调用方
+判断"这段还用不用再取"。它与 `MinuteBars` 是两件事：停牌日在 `MinuteBars` 里永远没有行，而在
+账里被记为"问过了、上游没有"，于是那个缺口不会被反复重取。
+
 子命令：
     update      增量入库并写出当日 Parquet（缺省从库中最后交易日续传，含当日重拉自愈）
     merge-month [--month YYYYMM]   缺省上月：整月导出 + 归档日度文件
@@ -34,7 +38,7 @@ import logging
 import os
 import sqlite3
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -55,6 +59,10 @@ DEFAULT_FREQUENCY = "5"
 
 MINUTE_K_FIELDS = "date,time,code,open,high,low,close,volume,amount"
 DAILY_K_FIELDS = "date,code,preclose,volume,amount"
+
+# 已问区间相隔几天以内算同一段。1 = 首尾相接（`2024-12-31` 与 `2025-01-01`）也并成一段：
+# 它们之间没有哪一天漏问。
+DAY_SPAN_ADJACENCY_DAYS = 1
 
 # 列名与类型镜像 D:\Md\Bar 既有文件（MdReader 的 union_by_name 跨文件查询要求类型一致）
 BAR_PARQUET_SCHEMA = pa.schema([
@@ -124,6 +132,21 @@ def load_config(config_file: str) -> dict[str, Any]:
 # ---------- BaoStock 拉取 ----------
 
 
+def collect_rows_or_raise(result_set: Any, stock_code: str) -> list[list[str]]:
+    """收集结果集；分页中途失败时**抛**，而不是静默截断。
+
+    `_collect_rows` 的 while 条件是 `error_code == "0"`，中途某一页失败时它只是跳出循环、把已经
+    拿到的行返回。调用方若照此入库，得到的是一个**截断却看不出被截断**的帧；再把它记进
+    `QueriedBarSpans` 的账，那个洞就再也不会被补。故收集完必须再看一次错误码。
+    """
+    rows = _collect_rows(result_set)
+
+    if result_set.error_code != "0":
+        raise RuntimeError(f"结果集分页中断: {stock_code} {result_set.error_msg}")
+
+    return rows
+
+
 def query_minute_bars(
     stock_code: str,
     start_date: str,
@@ -141,7 +164,7 @@ def query_minute_bars(
     )
     if result_set.error_code != "0":
         raise RuntimeError(f"query_history_k_data_plus 失败: {stock_code} {result_set.error_msg}")
-    minute_frame = pd.DataFrame(_collect_rows(result_set), columns=MINUTE_K_FIELDS.split(","))
+    minute_frame = pd.DataFrame(collect_rows_or_raise(result_set, stock_code), columns=MINUTE_K_FIELDS.split(","))
     for column in ("open", "high", "low", "close", "volume", "amount"):
         minute_frame[column] = pd.to_numeric(minute_frame[column], errors="coerce")
     invalid_count = int(minute_frame["close"].isna().sum())
@@ -163,7 +186,7 @@ def query_daily_bars(stock_code: str, start_date: str, end_date: str) -> pd.Data
     )
     if result_set.error_code != "0":
         raise RuntimeError(f"query_history_k_data_plus 失败: {stock_code} {result_set.error_msg}")
-    daily_frame = pd.DataFrame(_collect_rows(result_set), columns=DAILY_K_FIELDS.split(","))
+    daily_frame = pd.DataFrame(collect_rows_or_raise(result_set, stock_code), columns=DAILY_K_FIELDS.split(","))
     for column in ("preclose", "volume", "amount"):
         daily_frame[column] = pd.to_numeric(daily_frame[column], errors="coerce")
     return daily_frame.set_index("date")
@@ -224,6 +247,64 @@ def upsert_trading_day_stats(connection: sqlite3.Connection, stock_code: str, da
     )
 
 
+def upsert_queried_bar_span(
+    connection: sqlite3.Connection,
+    stock_code: str,
+    frequency: str,
+    start_day: str,
+    end_day: str,
+) -> None:
+    """把「这一次向上游问成功的日区间」并进该合约该频率的账。
+
+    先并再写：不并的话一次调用留一行，一年下来几百行；并了之后常驻的是互不相接的几段，
+    通常每合约一两行。区间是**闭**的，故首尾相接的两段（`2024-12-31` 与 `2025-01-01`）
+    也算同一段——它们之间的每一天都被问过。
+    """
+    existing_rows = connection.execute(
+        "SELECT StartDay, EndDay FROM QueriedBarSpans WHERE Code = ? AND Frequency = ?",
+        (stock_code, frequency),
+    ).fetchall()
+
+    merged_spans = merge_day_spans(
+        [(row[0], row[1]) for row in existing_rows] + [(start_day, end_day)]
+    )
+
+    connection.execute(
+        "DELETE FROM QueriedBarSpans WHERE Code = ? AND Frequency = ?",
+        (stock_code, frequency),
+    )
+    connection.executemany(
+        "INSERT INTO QueriedBarSpans (Code, Frequency, StartDay, EndDay) VALUES (?, ?, ?, ?)",
+        [
+            (stock_code, frequency, span_start, span_end)
+            for span_start, span_end in merged_spans
+        ],
+    )
+
+
+def merge_day_spans(day_spans: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """把重叠或首尾相接的日区间并成互不相接的几段（按起点升序）。"""
+    merged: list[list[str]] = []
+
+    for span_start, span_end in sorted(day_spans):
+        if merged and _spans_are_contiguous(span_start, merged[-1][1]):
+            if date.fromisoformat(span_end) > date.fromisoformat(merged[-1][1]):
+                merged[-1][1] = span_end
+            continue
+
+        merged.append([span_start, span_end])
+
+    return [(span_start, span_end) for span_start, span_end in merged]
+
+
+def _spans_are_contiguous(next_start: str, current_end: str) -> bool:
+    """下一段是否接着当前段：重叠，或正好从当前段的次日开始。"""
+    return (
+        date.fromisoformat(next_start).toordinal()
+        <= date.fromisoformat(current_end).toordinal() + DAY_SPAN_ADJACENCY_DAYS
+    )
+
+
 def ingest_stock(
     connection: sqlite3.Connection,
     stock_code: str,
@@ -231,11 +312,16 @@ def ingest_stock(
     start_date: str,
     end_date: str,
 ) -> list[str]:
-    """拉取单只股票区间数据并入库，返回有分钟数据的交易日（'YYYY-MM-DD' 升序）。"""
+    """拉取单只股票区间数据并入库，返回有分钟数据的交易日（'YYYY-MM-DD' 升序）。
+
+    账在**两路查询都成功之后**才记：`query_minute_bars` / `query_daily_bars` 在上游失败时都会
+    抛，抛了就写到账这一步；能记上就说明这一段的答案是上游给的，而不是我们被中断后猜的。
+    """
     minute_frame = query_minute_bars(stock_code, start_date, end_date, frequency)
     daily_frame = query_daily_bars(stock_code, start_date, end_date)
     upsert_minute_bars(connection, stock_code, frequency, minute_frame)
     upsert_trading_day_stats(connection, stock_code, daily_frame)
+    upsert_queried_bar_span(connection, stock_code, frequency, start_date, end_date)
     connection.commit()
     logger.info(f"{stock_code} 入库 {len(minute_frame)} 根 {frequency} 分钟 bar / {len(daily_frame)} 个交易日统计（{start_date} ~ {end_date}）")
     return sorted(minute_frame["date"].unique())
