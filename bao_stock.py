@@ -12,40 +12,38 @@
   - 交易日历
   - 宏观经济（存款利率、贷款利率、存款准备金率、货币供应量）
 
-用法: python BaoStock.py [选项]
-       python BaoStock.py --update             # 日K行情增量更新
-       python BaoStock.py --sync-securities     # 证券列表同步
-       python BaoStock.py --update-all          # 全量更新所有数据
-       python BaoStock.py --update-financials   # 财务数据
-       python BaoStock.py --update-macro        # 宏观经济数据
+用法: python bao_stock.py [选项]
+       python bao_stock.py --update             # 日K行情增量更新
+       python bao_stock.py --sync-securities     # 证券列表同步
+       python bao_stock.py --update-all          # 全量更新所有数据
+       python bao_stock.py --update-financials   # 财务数据
+       python bao_stock.py --update-macro        # 宏观经济数据
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
+import sqlite3
 import sys
-import time
+import threading
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
 import baostock as bs
 import pandas as pd
-import sqlite3
 
 # ---------- 配置 ----------
 
-CONFIG_FILE = "BaoStock.json"
+CONFIG_FILE = "bao_stock.json"
 DB_PATH = "stock_data.db"
 LOG_LEVEL = logging.INFO
+LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 MAX_LOGIN_RETRIES = 5
 RETRY_DELAY_SECONDS = 5
 
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 
@@ -76,7 +74,7 @@ def login_with_retry(
             f"登录失败（尝试 {attempt + 1}/{max_retries}）: {login_result.error_msg}"
         )
         if attempt < max_retries - 1:
-            time.sleep(delay)
+            threading.Event().wait(delay)
     return None
 
 
@@ -87,7 +85,6 @@ def init_database(connection: sqlite3.Connection) -> None:
     """初始化数据库：加载基础 Schema 后执行增量升级脚本。"""
     base_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # 1. 加载基础 Schema（v1.0.0，使用 IF NOT EXISTS 保证幂等）
     schema_dir = os.path.join(base_dir, "sql", "schema")
     schema_path = os.path.join(schema_dir, "Create_v1.0.0.sql")
 
@@ -99,7 +96,6 @@ def init_database(connection: sqlite3.Connection) -> None:
         connection.executescript(schema_file.read())
     logger.info("基础 Schema（v1.0.0）加载完成")
 
-    # 2. 执行增量升级脚本（按文件名排序）
     upgrades_dir = os.path.join(base_dir, "sql", "upgrades")
     if os.path.isdir(upgrades_dir):
         upgrade_files = sorted(
@@ -149,7 +145,6 @@ def _get_previous_trading_date(
     today = datetime.today()
     yesterday = today - timedelta(days=1)
 
-    # 1) 查本地缓存
     if connection is not None:
         try:
             cutoff = (today - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
@@ -164,10 +159,9 @@ def _get_previous_trading_date(
             row = cursor.fetchone()
             if row and row[0]:
                 return row[0]
-        except Exception:
-            pass  # 表可能还不存在，降级到 API 查询
+        except sqlite3.OperationalError as error:
+            logger.debug("本地 TradeDates 不可用，降级到 Baostock API：%s", error)
 
-    # 2) 调 Baostock 交易日历 API
     start = (today - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     end = yesterday.strftime("%Y-%m-%d")
     result = bs.query_trade_dates(start_date=start, end_date=end)
@@ -220,7 +214,7 @@ def fetch_and_store_stock(
     Returns:
         写入的价格行数。
     """
-    # 1. 原始价格（不复权，adjustflag="3"）
+    # 原始价格：不复权（Baostock adjustflag="3"）
     price_result = bs.query_history_k_data_plus(
         stock_code,
         "date,code,open,high,low,close,volume,amount",
@@ -244,7 +238,7 @@ def fetch_and_store_stock(
     for column in ["Open", "High", "Low", "Close", "Volume", "Amount"]:
         price_frame[column] = pd.to_numeric(price_frame[column], errors="coerce")
 
-    # 2. 复权因子：全部字段存储
+    # 复权因子：全部字段写入
     factor_result = bs.query_adjust_factor(stock_code, start_date=start_date)
     if factor_result.error_code == "0":
         factor_rows = _collect_rows(factor_result)
@@ -253,7 +247,6 @@ def fetch_and_store_stock(
             logger.info(f"因子原始字段: {raw_fields}")
             factor_frame = pd.DataFrame(factor_rows, columns=raw_fields)
 
-            # 动态构建字段映射（仅映射已知字段，其余忽略）
             field_mapping: dict[str, str] = {
                 "code": "Code",
                 "dividOperateDate": "EventDate",
@@ -280,7 +273,6 @@ def fetch_and_store_stock(
     else:
         logger.warning(f"{stock_code} 复权因子查询失败: {factor_result.error_msg}")
 
-    # 3. 写入价格
     price_frame.to_sql(
         "DailyRawPrices", connection, if_exists="append", index=False
     )
@@ -303,7 +295,6 @@ def sync_securities(connection: sqlite3.Connection) -> None:
     )
     logger.info(f"证券同步基准日期: {query_date}")
 
-    # 1. 获取全市场证券列表
     result = bs.query_all_stock(day=query_date)
     if result.error_code != "0":
         logger.error(f"获取证券列表失败: {result.error_msg}")
@@ -321,7 +312,6 @@ def sync_securities(connection: sqlite3.Connection) -> None:
     all_stocks.columns = all_stocks.columns.str.strip()
     logger.info(f"基准日期 {query_date} 全市场证券总数: {len(all_stocks)}")
 
-    # 2. 对比本地已有数据
     local_codes: set[str] = set(
         row[0] for row in connection.execute("SELECT Code FROM Securities")
     )
@@ -331,7 +321,6 @@ def sync_securities(connection: sqlite3.Connection) -> None:
     removed_codes = local_codes - today_codes
     common_codes = local_codes & today_codes
 
-    # 3. 新股 IPO
     if new_codes:
         # 批量获取基本信息，避免逐个查询
         basic_map: dict[str, dict[str, str]] = {}
@@ -376,7 +365,6 @@ def sync_securities(connection: sqlite3.Connection) -> None:
             type_label = "股票" if basic.get("type") == "1" else "非股票"
             logger.info(f"新增证券 {code} {stock_row['code_name']}（{type_label}）")
 
-    # 4. 退市处理
     for code in removed_codes:
         connection.execute(
             """UPDATE Securities
@@ -386,7 +374,6 @@ def sync_securities(connection: sqlite3.Connection) -> None:
         )
         logger.info(f"证券 {code} 已退市，标记退市日期 {query_date}")
 
-    # 5. 常态检查 common_codes：更名、停复牌
     #    先全部加载到内存，避免 5000+ 次单独查询
     local_info_map: dict[str, tuple[str, str]] = {
         row[0]: (row[1], str(row[2] if row[2] else ""))
@@ -405,7 +392,6 @@ def sync_securities(connection: sqlite3.Connection) -> None:
         current_name = stock_row["code_name"]
         current_status = str(int(stock_row["tradeStatus"]))
 
-        # 名称变更
         if local_name != current_name:
             connection.execute(
                 "INSERT INTO NameChangeLogs (Code, Date, OldName, NewName) "
@@ -418,7 +404,6 @@ def sync_securities(connection: sqlite3.Connection) -> None:
             )
             logger.info(f"证券 {code} 更名: 「{local_name}」→「{current_name}」")
 
-        # 交易状态变更（停牌/复牌）
         if local_status != current_status:
             connection.execute(
                 "INSERT INTO TradeStatusLogs (Code, Date, TradeStatus) "
@@ -485,7 +470,6 @@ def _fetch_and_store_financial(
     frame = pd.DataFrame(rows, columns=result.fields)
     frame["Year"] = year
     frame["Quarter"] = quarter
-    # 字段映射：Baostock 蛇形命名 → 数据库 PascalCase
     frame = frame.rename(
         columns={
             "code": "Code",
@@ -840,7 +824,6 @@ def update_index_constituents(connection: sqlite3.Connection) -> None:
         frame = pd.DataFrame(rows, columns=result.fields)
         frame["IndexCode"] = index_code
         frame["UpdateDate"] = query_date
-        # Baostock 返回 code/code_name → 数据库 Code/CodeName
         frame = frame.rename(
             columns={"code": "Code", "code_name": "CodeName"}
         )
@@ -875,7 +858,6 @@ def update_industry(connection: sqlite3.Connection) -> None:
 
     frame = pd.DataFrame(rows, columns=result.fields)
 
-    # 字段映射：Baostock 蛇形命名 → 数据库 PascalCase
     column_map = {
         "code": "Code",
         "code_name": "CodeName",
@@ -884,7 +866,6 @@ def update_industry(connection: sqlite3.Connection) -> None:
     }
     frame = frame.rename(columns=column_map)
 
-    # 写入行业分类表
     connection.execute(
         "DELETE FROM IndustryClassification WHERE UpdateDate=?", (today,)
     )
@@ -893,7 +874,6 @@ def update_industry(connection: sqlite3.Connection) -> None:
         "IndustryClassification", connection, if_exists="append", index=False
     )
 
-    # 更新 Securities 表中的行业信息
     updated_count = 0
     for _, row in frame.iterrows():
         connection.execute(
@@ -1126,7 +1106,7 @@ def update_money_supply(connection: sqlite3.Connection) -> None:
 
 def _run_update(task_func: Callable[[sqlite3.Connection], None]) -> None:
     """登录 Baostock → 执行任务 → 注销的统一流程。"""
-    with sqlite3.connect(DB_PATH) as connection:
+    with contextlib.closing(sqlite3.connect(DB_PATH)) as connection:
         init_database(connection)
         login_result = login_with_retry()
         if login_result is None:
@@ -1147,19 +1127,15 @@ def update_all_extended(
 
     logger.info("===== 全量更新开始 =====")
 
-    # 1/7 证券同步
     logger.info("--- 1/7 证券同步 ---")
     sync_securities(connection)
 
-    # 2/7 行业分类
     logger.info("--- 2/7 行业分类 ---")
     update_industry(connection)
 
-    # 3/7 指数成分股
     logger.info("--- 3/7 指数成分股 ---")
     update_index_constituents(connection)
 
-    # 4/7 日K行情
     if stock_codes:
         logger.info("--- 4/7 日K行情 ---")
         default_start = config.get("default_start_date", "2000-01-01")
@@ -1175,7 +1151,6 @@ def update_all_extended(
             if datetime.strptime(start, "%Y-%m-%d") <= datetime.today():
                 fetch_and_store_stock(connection, stock_code, start)
 
-    # 5/7 财务数据 & 除权除息 & 业绩
     if stock_codes:
         logger.info("--- 5/7 财务数据 & 除权除息 & 业绩 ---")
         update_financial_data(connection, stock_codes)
@@ -1183,14 +1158,12 @@ def update_all_extended(
         update_performance_express(connection, stock_codes)
         update_forecast_reports(connection, stock_codes)
 
-    # 6/7 宏观经济
     logger.info("--- 6/7 宏观经济 ---")
     update_deposit_rates(connection)
     update_loan_rates(connection)
     update_reserve_ratios(connection)
     update_money_supply(connection)
 
-    # 7/7 交易日历
     logger.info("--- 7/7 交易日历 ---")
     update_trade_dates(connection)
 
@@ -1241,7 +1214,7 @@ def update_all() -> None:
     stock_codes: list[str] = require_config_value(config, "stocks", CONFIG_FILE)
     default_start: str = config.get("default_start_date", "2000-01-01")
 
-    with sqlite3.connect(DB_PATH) as connection:
+    with contextlib.closing(sqlite3.connect(DB_PATH)) as connection:
         init_database(connection)
 
         login_result = login_with_retry()
@@ -1281,10 +1254,12 @@ def update_all() -> None:
 # ---------- 入口 ----------
 
 if __name__ == "__main__":
+    logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
+
     if "--update" in sys.argv:
         update_all()
     elif "--sync-securities" in sys.argv:
-        with sqlite3.connect(DB_PATH) as connection:
+        with contextlib.closing(sqlite3.connect(DB_PATH)) as connection:
             init_database(connection)
             login_result = login_with_retry()
             if login_result is None:
@@ -1327,7 +1302,7 @@ if __name__ == "__main__":
         _run_update(_update_macro)
     else:
         logger.info(
-            "用法: python BaoStock.py [选项]\n\n"
+            "用法: python bao_stock.py [选项]\n\n"
             "选项:\n"
             "  --update             增量更新日K行情\n"
             "  --sync-securities    同步全市场证券列表\n"

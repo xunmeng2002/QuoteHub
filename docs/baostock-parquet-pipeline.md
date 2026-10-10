@@ -1,6 +1,6 @@
 # BaoStock 分钟线回测数据管线使用说明
 
-`BaoStockParquet.py` 将证券宝（BaoStock）的 5/15/30/60 分钟 K 线落入 SQLite（事实源），并按日 / 月 / 年三代 Parquet 文件导出，供 QuantTrading 回测引擎的 Bar 撮合模式消费。日线与基本面数据采集（`BaoStock.py`）见 [baostock-data-collector.md](baostock-data-collector.md)。
+`bao_stock_parquet.py` 将证券宝（BaoStock）的 5/15/30/60 分钟 K 线落入 SQLite（事实源），并按日 / 月 / 年三代 Parquet 文件导出，供 QuantTrading 回测引擎的 Bar 撮合模式消费。日线与基本面数据采集（`bao_stock.py`）见 [baostock-data-collector.md](baostock-data-collector.md)。
 
 ## 目录
 
@@ -30,7 +30,7 @@ SQLite（stock_data.db，唯一事实源，主键 UPSERT 幂等）
 
 - 文件名带频率后缀（`_5m` / `_15m` / `_30m` / `_60m`），四种频率可并存于同一目录。
 - Parquet 文件不可修改，因此当月只新增日度文件；合并一律从数据库整段重新导出。
-- **写入粒度是"交易所 × 时间段"**：一个 Parquet 文件 = 一个交易所的一个周期段（日 / 月 / 年），文件内包含本次命令代码清单（缺省 = `BaoStockParquet.json` 全部）中该交易所所有代码的 bar，用 `InstrumentID` 列区分个股。不存在按单合约写文件的模式。
+- **写入粒度是"交易所 × 时间段"**：一个 Parquet 文件 = 一个交易所的一个周期段（日 / 月 / 年），文件内包含本次命令代码清单（缺省 = `bao_stock_parquet.json` 全部）中该交易所所有代码的 bar，用 `InstrumentID` 列区分个股。不存在按单合约写文件的模式。
 
 ## 2 环境准备
 
@@ -44,7 +44,7 @@ pip install baostock pandas pyarrow
 
 > **注意**：必须在 `D:\Gitee\QuoteHub` 目录下运行。SQLite 路径是相对路径 `stock_data.db`，换目录运行会另建一个空库。
 
-### 2.3 配置文件（BaoStockParquet.json）
+### 2.3 配置文件（bao_stock_parquet.json）
 
 | 键 | 说明 | 缺省 |
 | --- | --- | --- |
@@ -52,7 +52,7 @@ pip install baostock pandas pyarrow
 | `default_start_date` | 库中无数据时的默认回补起点 | 代码兜底 `2015-01-01` |
 | `parquet_output_root` | Parquet 输出根目录 | **无（必填）** |
 
-> **警告**：`stocks` 在两个脚本的配置里**各存一份，互不引用**。两个脚本共用 `stock_data.db`，但各自只按自己那份清单取数；本管线导出写文件时是"以交易所为单位整文件重写"，文件内容 = **本配置**的清单全集。**两处清单需自行保持一致**——只加了 `BaoStock.json` 而漏加本配置，导出的 Parquet 里就没有那只票，且不会有任何提示。改清单时请两份一起改。
+> **警告**：`stocks` 在两个脚本的配置里**各存一份，互不引用**。两个脚本共用 `stock_data.db`，但各自只按自己那份清单取数；本管线导出写文件时是"以交易所为单位整文件重写"，文件内容 = **本配置**的清单全集。**两处清单需自行保持一致**——只加了 `bao_stock.json` 而漏加本配置，导出的 Parquet 里就没有那只票，且不会有任何提示。改清单时请两份一起改。
 
 ```json
 {
@@ -75,8 +75,8 @@ pip install baostock pandas pyarrow
 ### 3.1 update —— 日常增量
 
 ```text
-python BaoStockParquet.py update
-python BaoStockParquet.py update --start 2024-11-01 --end 2024-11-15
+python bao_stock_parquet.py update
+python bao_stock_parquet.py update --start 2024-11-01 --end 2024-11-15
 ```
 
 - 每只代码从库中最后交易日续传拉取到今天，入库后为每个有数据的交易日写一个独立日度文件（包含该交易所全部配置代码）。
@@ -87,8 +87,8 @@ python BaoStockParquet.py update --start 2024-11-01 --end 2024-11-15
 ### 3.2 merge-month —— 月度合并
 
 ```text
-python BaoStockParquet.py merge-month               # 缺省上月
-python BaoStockParquet.py merge-month --month 202411
+python bao_stock_parquet.py merge-month               # 缺省上月
+python bao_stock_parquet.py merge-month --month 202411
 ```
 
 - 从库导出整月写 `YYYYMM_5m.parquet`，随后把该月全部日度文件移入 `Year=YYYY/archive/`。
@@ -98,8 +98,8 @@ python BaoStockParquet.py merge-month --month 202411
 ### 3.3 merge-year —— 年度合并
 
 ```text
-python BaoStockParquet.py merge-year                # 缺省去年
-python BaoStockParquet.py merge-year --year 2024
+python bao_stock_parquet.py merge-year                # 缺省去年
+python bao_stock_parquet.py merge-year --year 2024
 ```
 
 - 从库导出整年写 `YYYY_5m.parquet`，把该年全部月度文件与残留日度文件移入 archive。
@@ -109,7 +109,7 @@ python BaoStockParquet.py merge-year --year 2024
 ### 3.4 backfill —— 历史回补
 
 ```text
-python BaoStockParquet.py backfill --start 2024-01-01 --end 2024-12-31
+python bao_stock_parquet.py backfill --start 2024-01-01 --end 2024-12-31
 ```
 
 - 区间数据入库，并直接按年写出年度文件（不产生日度文件），仅触及回补区间相交的年份。
@@ -126,13 +126,13 @@ python BaoStockParquet.py backfill --start 2024-01-01 --end 2024-12-31
 | 每月初 | `merge-month` | 不联网 | 无 | 整月重写月度文件，日度文件入 archive |
 | 每年初 | `merge-year` | 不联网 | 无 | 整年重写年度文件，月度 / 残留日度入 archive |
 
-1. **首次建库**：配置 `BaoStockParquet.json` 的 stocks，执行 `backfill --start <起始日>`（`--end` 缺省今天）。
+1. **首次建库**：配置 `bao_stock_parquet.json` 的 stocks，执行 `backfill --start <起始日>`（`--end` 缺省今天）。
 2. **每日收盘后**：执行 `update`（自动续传；节假日无数据自然跳过）。
 3. **每月初**：执行 `merge-month`（缺省即上月）。
 4. **每年初**：执行 `merge-year`（缺省即去年）。
 5. **换频率**：`--frequency 15` 再走一遍建库流程即可，文件按后缀与 5 分钟数据并存；但同一回测根目录内不要混放多频率（见第 5 节）。
 
-> **注意**：导出写文件以交易所为单位——若用 `--codes` 只传一只，写出的文件会被重写为只含这一只（该交易所其他代码的行被挤出文件，库里不丢）。加新股票请先进 `BaoStockParquet.json` 再跑全集，保持"文件 = 配置全集的再导出"。
+> **注意**：导出写文件以交易所为单位——若用 `--codes` 只传一只，写出的文件会被重写为只含这一只（该交易所其他代码的行被挤出文件，库里不丢）。加新股票请先进 `bao_stock_parquet.json` 再跑全集，保持"文件 = 配置全集的再导出"。
 
 ## 5 回测接入（QuantTrading 侧）
 

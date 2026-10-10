@@ -1,6 +1,6 @@
-# BaoStock.py 基础数据采集使用说明
+# bao_stock.py 基础数据采集使用说明
 
-`BaoStock.py` 是 QuoteHub 的基础数据采集脚本：证券列表、日 K 行情、复权因子、季频财务、除权除息、业绩报告、指数成分、行业分类、交易日历、宏观经济，全部落入 SQLite（`stock_data.db`）。分钟线落 Parquet 管线见 [baostock-parquet-pipeline.md](baostock-parquet-pipeline.md)。
+`bao_stock.py` 是 QuoteHub 的基础数据采集脚本：证券列表、日 K 行情、复权因子、季频财务、除权除息、业绩报告、指数成分、行业分类、交易日历、宏观经济，全部落入 SQLite（`stock_data.db`）。分钟线落 Parquet 管线见 [baostock-parquet-pipeline.md](baostock-parquet-pipeline.md)。
 
 ## 目录
 
@@ -15,7 +15,7 @@
 ## 1 功能总览
 
 ```text
-python BaoStock.py [选项]        # 无参数打印用法
+python bao_stock.py [选项]        # 无参数打印用法
 ```
 
 | 命令 | 内容 | 联网 |
@@ -41,12 +41,12 @@ python BaoStock.py [选项]        # 无参数打印用法
 | 公司事件 | `DividendData`、`PerformanceExpress`（快报）、`ForecastReports`（预告） |
 | 参考数据 | `IndexConstituents`、`IndustryClassification`、`TradeDates`、`DepositRates`、`LoanRates`、`ReserveRatios`、`MoneySupply` |
 
-分钟线表 `MinuteBars` / `MinuteBarTradingDays` 由 `BaoStockParquet.py` 使用（同一数据库，见管线文档）。
+分钟线表 `MinuteBars` / `MinuteBarTradingDays` 由 `bao_stock_parquet.py` 使用（同一数据库，见管线文档）。
 
 ## 3 环境准备
 
 - 与管线脚本共用环境：在 `D:\Gitee\QuoteHub` 目录下运行（`stock_data.db` 与配置文件均为相对路径），依赖 `baostock`、`pandas`。
-- 本脚本读**自己的** `BaoStock.json`（与管线脚本的 `BaoStockParquet.json` 相互独立，见管线文档 §2.3）。其中的 `stocks` 是日 K / 财务 / 分红等按股票拉取命令的目标清单，**必填**：文件缺失、或键缺失/为空时脚本立即报错退出（`配置文件不存在: BaoStock.json` / `配置缺少必填项 stocks（BaoStock.json）`），不会静默跳过。与 `stocks` 无关的全市场级命令（`--update-index`、`--update-industry`、`--update-trade-dates`、`--update-macro`）不读配置，不受影响。
+- 本脚本读**自己的** `bao_stock.json`（与管线脚本的 `bao_stock_parquet.json` 相互独立，见管线文档 §2.3）。其中的 `stocks` 是日 K / 财务 / 分红等按股票拉取命令的目标清单，**必填**：文件缺失、或键缺失/为空时脚本立即报错退出（`配置文件不存在: bao_stock.json` / `配置缺少必填项 stocks（bao_stock.json）`），不会静默跳过。与 `stocks` 无关的全市场级命令（`--update-index`、`--update-industry`、`--update-trade-dates`、`--update-macro`）不读配置，不受影响。
 - 此处**没有** `--config` 之类的选项：配置文件名固定在代码里（`CONFIG_FILE`），只能靠"在仓根运行"定位。
 - `default_start_date` 是库内无历史数据时的下载起点（该项**可省**，代码兜底 `2000-01-01`）。
 - 建表自动完成：`init_database` 依次执行 `sql/schema/Create_v1.0.0.sql` 与 `sql/upgrades/` 下全部升级脚本。
@@ -78,9 +78,9 @@ python BaoStock.py [选项]        # 无参数打印用法
 1. **首次建库**：
 
 ```text
-python BaoStock.py --sync-securities
-python BaoStock.py --update-trade-dates
-python BaoStock.py --update-all
+python bao_stock.py --sync-securities
+python bao_stock.py --update-trade-dates
+python bao_stock.py --update-all
 ```
 
 交易日历先建，证券同步的"最近交易日"才有依据。
@@ -88,8 +88,8 @@ python BaoStock.py --update-all
 2. **日常（每日收盘后）**：
 
 ```text
-python BaoStock.py --update
-python BaoStockParquet.py update
+python bao_stock.py --update
+python bao_stock_parquet.py update
 ```
 
 前者补日 K 与基本面清单，后者补分钟线并写当日 Parquet。
@@ -111,5 +111,5 @@ python BaoStockParquet.py update
 
 - **历史深度**：CLI 的财务只拉最近 4 个季度、分红只拉最近 4 年；要更早的历史需在代码里给 `update_financial_data` / `update_dividend_data` 传 `years` / `quarters` 参数（CLI 未暴露）。
 - **价格不复权**：`DailyRawPrices` 存原始价，除权日前后价格不连续；需要复权价时用 `AdjustFactors` 的前复权 / 后复权因子自行换算。
-- 分钟线（5/15/30/60 分钟）不在本脚本范围，走 `BaoStockParquet.py`。
-- 两个脚本共用同一 `stock_data.db`：`BaoStockParquet.py` 的建表升级脚本由同一 `init_database` 自动应用，互相不影响对方数据。
+- 分钟线（5/15/30/60 分钟）不在本脚本范围，走 `bao_stock_parquet.py`。
+- 两个脚本共用同一 `stock_data.db`：`bao_stock_parquet.py` 的建表升级脚本由同一 `init_database` 自动应用，互相不影响对方数据。

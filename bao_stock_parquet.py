@@ -32,8 +32,11 @@ Parquet 文件成为数据库的纯再导出（不做文件侧合并），从根
       （或命令行 --output-root / --codes）提供，两处都缺即报错退出。
 """
 
+from __future__ import annotations
+
 import argparse
 import calendar
+import contextlib
 import fnmatch
 import logging
 import os
@@ -48,13 +51,13 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from BaoStock import DB_PATH, _collect_rows, init_database, load_config_file, login_with_retry, require_config_value
+from bao_stock import DB_PATH, _collect_rows, init_database, load_config_file, login_with_retry, require_config_value
 
 logger = logging.getLogger(__name__)
 
 # ---------- 配置 ----------
 
-CONFIG_FILE = "BaoStockParquet.json"
+CONFIG_FILE = "bao_stock_parquet.json"
 CONFIG_KEY_OUTPUT_ROOT = "parquet_output_root"
 DEFAULT_FREQUENCY = "5"
 
@@ -731,30 +734,29 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     output_root = resolve_output_root(arguments.output_root, config, arguments.config)
 
-    connection = connect_database()
-    logged_in = False
-    try:
-        if arguments.command in ("update", "backfill"):
-            if login_with_retry() is None:
-                raise SystemExit("BaoStock 登录失败")
-            logged_in = True
+    with contextlib.closing(connect_database()) as connection:
+        logged_in = False
+        try:
+            if arguments.command in ("update", "backfill"):
+                if login_with_retry() is None:
+                    raise SystemExit("BaoStock 登录失败")
+                logged_in = True
 
-        if arguments.command == "update":
-            run_update(connection, stock_codes, frequency, output_root,
-                       arguments.start, arguments.end or time.strftime("%Y-%m-%d"), default_start_date)
-        elif arguments.command == "merge-month":
-            run_merge_month(connection, stock_codes, frequency, output_root,
-                            arguments.month or get_last_month())
-        elif arguments.command == "merge-year":
-            run_merge_year(connection, stock_codes, frequency, output_root,
-                           arguments.year or str(datetime.today().year - 1))
-        elif arguments.command == "backfill":
-            run_backfill(connection, stock_codes, frequency, output_root,
-                         arguments.start, arguments.end or time.strftime("%Y-%m-%d"))
-    finally:
-        if logged_in:
-            bs.logout()
-        connection.close()
+            if arguments.command == "update":
+                run_update(connection, stock_codes, frequency, output_root,
+                           arguments.start, arguments.end or time.strftime("%Y-%m-%d"), default_start_date)
+            elif arguments.command == "merge-month":
+                run_merge_month(connection, stock_codes, frequency, output_root,
+                                arguments.month or get_last_month())
+            elif arguments.command == "merge-year":
+                run_merge_year(connection, stock_codes, frequency, output_root,
+                               arguments.year or str(datetime.today().year - 1))
+            elif arguments.command == "backfill":
+                run_backfill(connection, stock_codes, frequency, output_root,
+                             arguments.start, arguments.end or time.strftime("%Y-%m-%d"))
+        finally:
+            if logged_in:
+                bs.logout()
 
 
 if __name__ == "__main__":
