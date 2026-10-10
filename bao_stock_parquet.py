@@ -674,7 +674,7 @@ def write_mismatch_report(target_file: str, period: str, frequency: str, mismatc
     """
     for record in mismatch_records:
         if abs(record["DeviationPercent"]) > 5:
-            logger.warning("%s %s 分钟量与日量偏差 %s%%，超过 5%%", record['InstrumentID'], record['TradingDay'], record['DeviationPercent'])
+            logger.warning("%s %s 分钟量与日量偏差 %s%%，超过 5%%", record["InstrumentID"], record["TradingDay"], record["DeviationPercent"])
     if not mismatch_records:
         return
     report_file = os.path.join(os.path.dirname(target_file), f"{period}_{frequency}m_mismatch.csv")

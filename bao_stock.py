@@ -372,7 +372,7 @@ def sync_securities(connection: sqlite3.Connection) -> None:
                 ),
             )
             type_label = "股票" if basic.get("type") == "1" else "非股票"
-            logger.info("新增证券 %s %s（%s）", code, stock_row['code_name'], type_label)
+            logger.info("新增证券 %s %s（%s）", code, stock_row["code_name"], type_label)
 
     for code in removed_codes:
         connection.execute(
