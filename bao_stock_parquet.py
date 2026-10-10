@@ -986,7 +986,10 @@ def parse_arguments() -> argparse.Namespace:
         Args:
             sub_parser: 目标子命令的 ArgumentParser。
         """
-        sub_parser.add_argument("--config", default=CONFIG_FILE, help=f"配置文件路径，缺省 {CONFIG_FILE}（提供 stocks / default_start_date / parquet_output_root）")
+        sub_parser.add_argument(
+            "--config", default=CONFIG_FILE,
+            help=f"配置文件路径，缺省 {CONFIG_FILE}（提供 stocks / default_start_date / parquet_output_root）",
+        )
         sub_parser.add_argument("--codes", default=None, help="逗号分隔的证券代码，缺省取配置文件 stocks")
         sub_parser.add_argument("--frequency", default=DEFAULT_FREQUENCY, choices=["5", "15", "30", "60"], help="分钟频率")
         sub_parser.add_argument("--output-root", default=None, help=f"Parquet 输出根目录（相对当前工作目录）；缺省取配置 {CONFIG_KEY_OUTPUT_ROOT}，两处都无则报错退出")

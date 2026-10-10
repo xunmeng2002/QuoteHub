@@ -1,23 +1,43 @@
+# 本项目编辑器统一配置
+#
+# 本文件是「机械格式」的唯一权威：缩进、行宽、换行符、编码、尾随空白。
+# 命名 / 结构 / 安全等语言规则见 rules/*-style.md，不在此文件表达。
+# 依据：cpp-style.md §3、python-style.md §3、database-style.md、
+#       markdown-style.md §12
+#
+# 行宽取全局 150：一处定义、全仓一致，与 markdown-style.md §12 的
+# 「纯文本 ≤ 150 字符」、cpp-style.md §3 的函数签名单行阈值一致。
 root = true
 
+# ============ 全体文件 ============
 [*]
-indent_style = space
-end_of_line = lf
 charset = utf-8
-trim_trailing_whitespace = true
+end_of_line = lf
+indent_style = space
 insert_final_newline = true
+trim_trailing_whitespace = true
+max_line_length = 150
 
+# ============ C / C++（cpp-style.md §3） ============
 [*.{cpp,h,hpp}]
 indent_size = 4
 
+# ============ C#（csharp-style.md） ============
 [*.cs]
 indent_size = 4
 
+# ============ Python（python-style.md） ============
 [*.{py,pyi}]
 indent_size = 4
 
+# ============ SQL（database-style.md：多字段时每字段独占一行、缩进 4 空格） ============
+[*.sql]
+indent_size = 4
+
+# ============ 前端（web-style.md） ============
 [*.{js,ts,vue,css,scss,html}]
 indent_size = 2
 
+# ============ 文档（markdown-style.md） ============
 [*.{md,markdown}]
 indent_size = 2
