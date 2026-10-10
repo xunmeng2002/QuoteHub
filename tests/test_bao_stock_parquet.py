@@ -24,9 +24,7 @@ from bao_stock_parquet import (
         ("SH.600519", ("SSE", "600519")),
     ],
 )
-def test_split_stock_code_maps_prefix_to_exchange(
-    stock_code: str, expected_exchange_and_instrument: tuple[str, str]
-) -> None:
+def test_split_stock_code_maps_prefix_to_exchange(stock_code: str, expected_exchange_and_instrument: tuple[str, str]) -> None:
     assert split_stock_code(stock_code) == expected_exchange_and_instrument
 
 

@@ -71,10 +71,7 @@ def _collect_rows(result_set: Any) -> list[list[str]]:
 # ---------- Baostock 登录 ----------
 
 
-def login_with_retry(
-    max_retries: int = MAX_LOGIN_RETRIES,
-    delay: int = RETRY_DELAY_SECONDS,
-) -> Any | None:
+def login_with_retry(max_retries: int = MAX_LOGIN_RETRIES, delay: int = RETRY_DELAY_SECONDS) -> Any | None:
     """带重试地登录 Baostock。
 
     Args:
@@ -150,10 +147,7 @@ def init_database(connection: sqlite3.Connection) -> None:
 # ---------- 交易日推算 ----------
 
 
-def _get_previous_trading_date(
-    connection: sqlite3.Connection | None = None,
-    lookback_days: int = 10,
-) -> str | None:
+def _get_previous_trading_date(connection: sqlite3.Connection | None = None, lookback_days: int = 10) -> str | None:
     """推算最近一个交易日（不晚于昨天）。
 
     优先用本地 TradeDates 表查询，若表不存在或无数据则调用 Baostock API。
@@ -207,10 +201,7 @@ def _get_previous_trading_date(
 # ---------- 查最新日期 ----------
 
 
-def get_last_date(
-    connection: sqlite3.Connection,
-    stock_code: str,
-) -> str | None:
+def get_last_date(connection: sqlite3.Connection, stock_code: str) -> str | None:
     """查库中该证券原始日线的最新日期，供增量下载算起点。
 
     Args:
@@ -236,11 +227,7 @@ def get_last_date(
 # ---------- 下载并存储单只股票 ----------
 
 
-def fetch_and_store_stock(
-    connection: sqlite3.Connection,
-    stock_code: str,
-    start_date: str,
-) -> int:
+def fetch_and_store_stock(connection: sqlite3.Connection, stock_code: str, start_date: str) -> int:
     """下载单只股票的日K数据及复权因子，写入数据库。
 
     Args:
@@ -470,15 +457,8 @@ def sync_securities(connection: sqlite3.Connection) -> None:
 # ------------------------------------------------------------------
 
 
-def _fetch_and_store_financial(
-    connection: sqlite3.Connection,
-    code: str,
-    year: int,
-    quarter: int,
-    query_func: Callable[..., Any],
-    table_name: str,
-    numeric_fields: list[str],
-) -> int:
+def _fetch_and_store_financial(connection: sqlite3.Connection, code: str, year: int, quarter: int,
+                               query_func: Callable[..., Any], table_name: str, numeric_fields: list[str]) -> int:
     """通用财务数据采集器。
 
     调用 Baostock 财务查询接口，将结果写入指定 SQLite 表。
@@ -572,12 +552,8 @@ def _quarter_window_start(quarters_back: int = 4) -> str:
 # ------------------------------------------------------------------
 
 
-def update_financial_data(
-    connection: sqlite3.Connection,
-    stock_codes: list[str],
-    years: list[int] | None = None,
-    quarters: list[int] | None = None,
-) -> None:
+def update_financial_data(connection: sqlite3.Connection, stock_codes: list[str], years: list[int] | None = None,
+                          quarters: list[int] | None = None) -> None:
     """遍历股票列表，下载 6 大财务指标数据。
 
     Args:
@@ -656,11 +632,7 @@ def update_financial_data(
 # ------------------------------------------------------------------
 
 
-def update_dividend_data(
-    connection: sqlite3.Connection,
-    stock_codes: list[str],
-    years: list[int] | None = None,
-) -> None:
+def update_dividend_data(connection: sqlite3.Connection, stock_codes: list[str], years: list[int] | None = None) -> None:
     """下载除权除息信息。
 
     Args:
@@ -730,12 +702,8 @@ def update_dividend_data(
 # ------------------------------------------------------------------
 
 
-def update_performance_express(
-    connection: sqlite3.Connection,
-    stock_codes: list[str],
-    start_date: str | None = None,
-    end_date: str | None = None,
-) -> None:
+def update_performance_express(connection: sqlite3.Connection, stock_codes: list[str], start_date: str | None = None,
+                               end_date: str | None = None) -> None:
     """下载业绩快报。接口按日期区间查询（非年+季），Year/Quarter 由统计日期推导。
 
     Args:
@@ -806,12 +774,8 @@ def update_performance_express(
 # ------------------------------------------------------------------
 
 
-def update_forecast_reports(
-    connection: sqlite3.Connection,
-    stock_codes: list[str],
-    start_date: str | None = None,
-    end_date: str | None = None,
-) -> None:
+def update_forecast_reports(connection: sqlite3.Connection, stock_codes: list[str], start_date: str | None = None,
+                            end_date: str | None = None) -> None:
     """下载业绩预告。接口按日期区间查询（非年+季），Year/Quarter 由统计日期推导。
 
     Args:
@@ -989,11 +953,7 @@ def update_industry(connection: sqlite3.Connection) -> None:
 # ------------------------------------------------------------------
 
 
-def update_trade_dates(
-    connection: sqlite3.Connection,
-    start_date: str = "1990-12-19",
-    end_date: str | None = None,
-) -> None:
+def update_trade_dates(connection: sqlite3.Connection, start_date: str = "1990-12-19", end_date: str | None = None) -> None:
     """更新交易日历。
 
     Args:
@@ -1235,9 +1195,7 @@ def _run_update(task_func: Callable[[sqlite3.Connection], None]) -> None:
             bs.logout()
 
 
-def update_all_extended(
-    connection: sqlite3.Connection, config: dict[str, Any]
-) -> None:
+def update_all_extended(connection: sqlite3.Connection, config: dict[str, Any]) -> None:
     """全量更新所有数据类别。
 
     Args:
@@ -1327,12 +1285,7 @@ def load_config_file(config_file: str) -> dict[str, Any]:
     return load_config(config_file)
 
 
-def require_config_value(
-    config: dict[str, Any],
-    config_key: str,
-    config_file: str,
-    command_line_alternative: str | None = None,
-) -> Any:
+def require_config_value(config: dict[str, Any], config_key: str, config_file: str, command_line_alternative: str | None = None) -> Any:
     """取必填配置项；缺失或为空即报错退出——配置一律不兜底。
 
     兜底会让"配置漏写"与"配置写对"表现一致：代码清单悄悄变空、输出路径悄悄落到别处，

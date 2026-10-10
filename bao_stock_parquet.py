@@ -208,12 +208,7 @@ def collect_rows_or_raise(result_set: Any, stock_code: str) -> list[list[str]]:
     return rows
 
 
-def query_minute_bars(
-    stock_code: str,
-    start_date: str,
-    end_date: str,
-    frequency: str,
-) -> pd.DataFrame:
+def query_minute_bars(stock_code: str, start_date: str, end_date: str, frequency: str) -> pd.DataFrame:
     """拉取分钟 K 线并转为数值 DataFrame（BaoStock 返回值全为字符串）。
 
     Args:
@@ -358,13 +353,7 @@ def upsert_trading_day_stats(connection: sqlite3.Connection, stock_code: str, da
     )
 
 
-def upsert_queried_bar_span(
-    connection: sqlite3.Connection,
-    stock_code: str,
-    frequency: str,
-    start_day: str,
-    end_day: str,
-) -> None:
+def upsert_queried_bar_span(connection: sqlite3.Connection, stock_code: str, frequency: str, start_day: str, end_day: str) -> None:
     """把「这一次向上游问成功的日区间」并进该合约该频率的账。
 
     先并再写：不并的话一次调用留一行，一年下来几百行；并了之后常驻的是互不相接的几段，
@@ -438,13 +427,7 @@ def _spans_are_contiguous(next_start: str, current_end: str) -> bool:
     )
 
 
-def ingest_stock(
-    connection: sqlite3.Connection,
-    stock_code: str,
-    frequency: str,
-    start_date: str,
-    end_date: str,
-) -> list[str]:
+def ingest_stock(connection: sqlite3.Connection, stock_code: str, frequency: str, start_date: str, end_date: str) -> list[str]:
     """拉取单只股票区间数据并入库，返回有分钟数据的交易日（'YYYY-MM-DD' 升序）。
 
     账在**两路查询都成功之后**才记：`query_minute_bars` / `query_daily_bars` 在上游失败时都会
@@ -537,13 +520,7 @@ def load_trading_day_stats(connection: sqlite3.Connection, stock_code: str, star
 # ---------- Bar 行构建（与旧版一致：原始量额 → 累计/增量语义映射） ----------
 
 
-def build_bar_frame(
-    minute_frame: pd.DataFrame,
-    daily_frame: pd.DataFrame,
-    exchange_id: str,
-    instrument_id: str,
-    preces: str,
-) -> pd.DataFrame:
+def build_bar_frame(minute_frame: pd.DataFrame, daily_frame: pd.DataFrame, exchange_id: str, instrument_id: str, preces: str) -> pd.DataFrame:
     """将单只股票的分钟线映射为 Bar Parquet 行（Volume/LastTraded 语义见 detect_cumulative_mode）。
 
     Args:
@@ -736,13 +713,7 @@ def write_mismatch_report(target_file: str, period: str, frequency: str, mismatc
     logger.warning(f"{os.path.basename(target_file)} 共 {len(mismatch_records)} 天分钟量与日量偏差超 1%，明细见 {report_file}")
 
 
-def warn_coverage_shrink(
-    connection: sqlite3.Connection,
-    frequency: str,
-    start_day: str,
-    end_day: str,
-    target_file: str,
-) -> None:
+def warn_coverage_shrink(connection: sqlite3.Connection, frequency: str, start_day: str, end_day: str, target_file: str) -> None:
     """重写既有文件前检查覆盖收缩（仅告警不阻断）：
     1) 既有 span 超出本次导出区间——重写后文件范围变窄；
     2) 库中该频率在该区间完全没有既有文件两端的天数——重写将丢失库外天数。
@@ -779,17 +750,9 @@ def warn_coverage_shrink(
 # ---------- 导出（数据库 → Parquet，唯一出口） ----------
 
 
-def export_bars_from_database(
-    connection: sqlite3.Connection,
-    output_root: str,
-    frequency: str,
-    exchange_id: str,
-    stock_codes: list[str],
-    start_day: str,
-    end_day: str,
-    period: str,
-    archive_patterns: list[str],
-) -> None:
+def export_bars_from_database(connection: sqlite3.Connection, output_root: str, frequency: str, exchange_id: str,
+                              stock_codes: list[str], start_day: str, end_day: str, period: str,
+                              archive_patterns: list[str]) -> None:
     """从库导出 [start_day, end_day] 全部代码到 period 命名文件；写出后归档匹配的上一代文件。
 
     Args:
@@ -829,15 +792,8 @@ def export_bars_from_database(
 # ---------- 子命令 ----------
 
 
-def run_update(
-    connection: sqlite3.Connection,
-    stock_codes: list[str],
-    frequency: str,
-    output_root: str,
-    start_date: str | None,
-    end_date: str,
-    default_start_date: str,
-) -> None:
+def run_update(connection: sqlite3.Connection, stock_codes: list[str], frequency: str, output_root: str,
+               start_date: str | None, end_date: str, default_start_date: str) -> None:
     """增量入库并按日写出 Parquet。续传起点为库中最后交易日本身（当日重拉自愈半截数据，
     幂等由主键保证）；显式 --start 时对所有代码强制从该日起拉取。
 
@@ -879,13 +835,7 @@ def get_last_month() -> str:
     return last_month_last_day.strftime("%Y%m")
 
 
-def run_merge_month(
-    connection: sqlite3.Connection,
-    stock_codes: list[str],
-    frequency: str,
-    output_root: str,
-    month: str,
-) -> None:
+def run_merge_month(connection: sqlite3.Connection, stock_codes: list[str], frequency: str, output_root: str, month: str) -> None:
     """整月导出为月度文件，归档该月全部日度文件。
 
     Args:
@@ -908,13 +858,7 @@ def run_merge_month(
         )
 
 
-def run_merge_year(
-    connection: sqlite3.Connection,
-    stock_codes: list[str],
-    frequency: str,
-    output_root: str,
-    year: str,
-) -> None:
+def run_merge_year(connection: sqlite3.Connection, stock_codes: list[str], frequency: str, output_root: str, year: str) -> None:
     """整年导出为年度文件，归档该年全部月度文件与残留日度文件。
 
     Args:
@@ -934,14 +878,7 @@ def run_merge_year(
         )
 
 
-def run_backfill(
-    connection: sqlite3.Connection,
-    stock_codes: list[str],
-    frequency: str,
-    output_root: str,
-    start_date: str,
-    end_date: str,
-) -> None:
+def run_backfill(connection: sqlite3.Connection, stock_codes: list[str], frequency: str, output_root: str, start_date: str, end_date: str) -> None:
     """区间入库并直接写出年度 Parquet（历史回补不产生日度文件）；仅触及回补区间相交的年份。
 
     Args:
