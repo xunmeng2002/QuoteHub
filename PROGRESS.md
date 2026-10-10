@@ -31,10 +31,11 @@
 - `python bao_stock.py --update-all` 尚未实际执行（全量拉取耗时较长，且会写库）。**注**：本次环境重建后**未做 baostock 登录端到端**，"装好了"目前只验到"脚本能加载"，没验到"能取数"。
 - 是否需要把 Python 运行时也锁定为其他 LTS 版本（原基线 3.14.5，本机现为 3.14.7，且 3.14.7 已被本次重建沿用）。
 - 配置拆分后，两份 `stocks` 清单**需手工保持一致**（`bao_stock.json` 与 `bao_stock_parquet.json`）。这是用户明知的取舍（换取"无共享契约就不共用文件"），故不预先加机制；若日后漏改导致某票的 bar 缺出文件，再考虑加一致性校验（如脚本间比对配置或检查告警）。
-- `rules/python-style.md` 审查的 **🟡 低档项**：① docstring 用途与规范不符、② docstring 覆盖率不一致、④ §9 测试规范未落地——**三项已于 2026-10-10 处理完毕，见上方 ✅ 对应条**。**仅剩 ③ 未决**：`.editorconfig` 未设 `max_line_length`，`bao_stock_parquet.py` 现有 44 行 >120 字符（当轮用户明确只选 ① ② ④，未选 ③，故未动）。
+- `rules/python-style.md` 审查的 **🟡 四项已全部了结**：① docstring 用途与规范不符、② docstring 覆盖率不一致、④ §9 测试规范未落地，**于 2026-10-10 处理完毕**（见上方 ✅ 对应条）；③ 行宽 **于 2026-10-10 裁定为 150 并落地**（见下方备注「行宽口径」）。**由此浮出的新未决项**：加上 `max_line_length = 150` 后 markdown 侧有 36 行超标（`PROGRESS.md` 14 行、`docs/` 22 行，最长 2694 字符）——是保持现状（隔壁仓同样大面积超标，QuantTrading 达 458 行），还是清理既有长行，待定。
 
 ## 备注
 
 - 诊断遗留的临时下载目录（可自行清理）：`%TEMP%\pdtest`、`%TEMP%\pdtest2`、`%TEMP%\bscheck`、`%TEMP%\patest`。
 - ✅ 已完成区本轮后**已达 6 批**，按 §8.1「超过 5 批即滚动」应把最旧一条（首个 pip/依赖安装条，已被后续"环境重建"条取代）移入 `PROGRESS-archive.md` 并在 `PROGRESS-index.md` 补索引行。**未擅自执行**：归档条目 ID 按规则「取自拆分当日的文档顺序」且「此后永久稳定」，编号起点在本仓无先例（归档层尚未建立），需用户确认后再动。当前 `PROGRESS.md` 21 KB，远低于 50 KB 目标，不急。
+- **行宽口径 150**（2026-10-10 裁定）。`python-style.md` §3 把缩进/行宽/换行符一律划归项目根 `.editorconfig` 管，故行宽不写进 rules 文件。本仓那份原先**缺 `max_line_length`**，是隔壁六仓（QuantTrading / Mdb / Beacon / DbAdapters / Templates / Spark）里唯一掉队的——它们都声明 `max_line_length = 150` 并在头注释写明来处。已按兄弟仓模板补齐：`[*]` 补 `max_line_length = 150`、补头注释（「机械格式的唯一权威」＋ 150 的来处）与分节注释，并顺手补 `[*.sql] indent_size = 4`（本仓有 6 个 .sql 受控文件，此前无任何段覆盖，只能落编辑器默认值）。**口径来处**：`markdown-style.md` §12「纯文本 ≤ 150 字符」＋ `cpp-style.md` §3 的函数签名单行阈值 150（**该文件里的 120 是"超过阈值后换行、每行填充到接近 120"，是填充目标不是上限**，此前误当上限用）。**落地后现状**：代码文件 0 行超标（原 `bao_stock_parquet.py` 有 1 行 151 字符，已拆行），markdown 36 行超标未处理（见 ❓）。
 - `__pycache__/` 内仍留着改名前的 `BaoStock*.cpython-*.pyc`（旧模块名的孤儿产物；该目录已被 `.gitignore` 忽略，Python 不会再加载它们，无害）。如需清理，**逐个 `rm` 文件**而非递归删目录。
