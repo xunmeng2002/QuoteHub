@@ -1158,9 +1158,10 @@ def update_all_extended(connection: sqlite3.Connection, config: JsonObject) -> N
 
     Args:
         connection: 已打开的 SQLite 连接。
-        config: 解析后的配置字典，须含 stocks 键。
+        config: 解析后的配置字典，须含 stocks 与 default_start_date 键。
     """
     stock_codes: list[str] = require_config_value(config, "stocks", CONFIG_FILE)
+    default_start: str = require_config_value(config, "default_start_date", CONFIG_FILE)
 
     logger.info("===== 全量更新开始 =====")
 
@@ -1175,7 +1176,6 @@ def update_all_extended(connection: sqlite3.Connection, config: JsonObject) -> N
 
     if stock_codes:
         logger.info("--- 4/7 日K行情 ---")
-        default_start = config.get("default_start_date", "2000-01-01")
         for stock_code in stock_codes:
             logger.info("处理 %s ...", stock_code)
             last_date = get_last_date(connection, stock_code)
@@ -1267,7 +1267,7 @@ def update_all() -> None:
     """遍历配置中的股票代码，增量更新行情数据。"""
     config = load_config_file(CONFIG_FILE)
     stock_codes: list[str] = require_config_value(config, "stocks", CONFIG_FILE)
-    default_start: str = config.get("default_start_date", "2000-01-01")
+    default_start: str = require_config_value(config, "default_start_date", CONFIG_FILE)
 
     with contextlib.closing(sqlite3.connect(DB_PATH)) as connection:
         init_database(connection)

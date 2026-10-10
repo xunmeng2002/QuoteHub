@@ -26,6 +26,12 @@ def test_require_config_value_exits_on_missing_or_empty(invalid_config: dict[str
     with pytest.raises(SystemExit):
         require_config_value(invalid_config, "stocks", "config.json")
 
+def test_require_config_value_exits_on_missing_start_date() -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        require_config_value({"stocks": ["sh.600519"]}, "default_start_date", "config.json")
+
+    assert "default_start_date" in str(exit_info.value)
+
 def test_require_config_value_names_config_file_and_cli_alternative() -> None:
     with pytest.raises(SystemExit) as exit_info:
         require_config_value({}, "parquet_output_root", "config.json", "--output-root")
