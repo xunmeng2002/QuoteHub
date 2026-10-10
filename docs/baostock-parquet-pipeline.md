@@ -49,7 +49,7 @@ pip install baostock pandas pyarrow
 | 键 | 说明 | 缺省 |
 | --- | --- | --- |
 | `stocks` | 证券代码列表，`sh.` / `sz.` 前缀 + 6 位代码 | 无（必填） |
-| `default_start_date` | 库中无数据时的默认回补起点 | **无（必填）** |
+| `default_start_date` | 库中无数据时的默认回补起点 | 仅 `update` 必填；`merge-*` / `backfill` 不读它 |
 | `parquet_output_root` | Parquet 输出根目录 | **无（必填）** |
 
 > **注意**：`config.json` 由 `bao_stock.py` 与 `bao_stock_parquet.py` **共用一份**，`stocks` 全仓只此一处。两脚本共用 `stock_data.db`，日线采集与分钟线导出读的是同一份清单，结构上不可能不一致。本管线导出写文件时"以交易所为单位整文件重写"，文件内容 = 本配置的清单全集；清单里没有的票，导出的 Parquet 里也不会有。改清单 = 改这一处。
@@ -62,7 +62,7 @@ pip install baostock pandas pyarrow
 }
 ```
 
-> **注意**：本表三个键**都没有代码兜底**，缺任一即报错退出。以 `parquet_output_root` 为例——配置里不写、命令行也不传 `--output-root`，脚本会立即报错退出，不会回退到任何写死的路径。这是刻意的：有兜底时"配置漏写"与"配置写对"表现一致，路径会悄悄落到别处，本键当初被误当成硬编码正是这个原因。
+> **注意**：本表的键**都没有代码兜底**，缺了即报错退出，不会回退到任何写死的默认值；但只在**真正用到它的子命令**上要求——`parquet_output_root` 与 `stocks` 每个子命令都要（可分别用 `--output-root` / `--codes` 替代），`default_start_date` 只有 `update` 要。以 `parquet_output_root` 为例——配置里不写、命令行也不传 `--output-root`，脚本会立即报错退出，不会回退到任何写死的路径。这是刻意的：有兜底时"配置漏写"与"配置写对"表现一致，路径会悄悄落到别处，本键当初被误当成硬编码正是这个原因。
 
 > **注意**：`parquet_output_root` 是**相对当前工作目录**解析的，不是相对配置文件。故仍须在 QuoteHub 仓根运行（见 2.2）。示例值 `../QuantTrading/MdBaoStock` 指向 QuantTrading 仓根下的 `MdBaoStock`，与隔壁仓 `BackTest.json` 的 `MdDataPath` 指向同一实体。
 

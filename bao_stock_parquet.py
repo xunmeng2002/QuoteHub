@@ -28,8 +28,9 @@ Parquet 文件成为数据库的纯再导出（不做文件侧合并），从根
       ExchangeID 用 SSE/SZSE，InstrumentID 用 6 位代码（如 600519）。
     - SQLite 路径复用 BaoStock.DB_PATH（stock_data.db），须在 QuoteHub 目录下运行；
       建表由 BaoStock.init_database 自动应用（sql/upgrades/Update_v2.1.0.sql）。
-    - 三个配置键均**无代码兜底**：parquet_output_root / stocks / default_start_date
-      一律必填，缺任一即报错退出（前两者另有 --output-root / --codes 命令行替代）。
+    - 配置键均**无代码兜底**，一律必填，缺任一即报错退出；但只在真正用到它的
+      子命令上要求：parquet_output_root 与 stocks 每个子命令都要（另有
+      --output-root / --codes 命令行替代），default_start_date 仅 update 需要。
 """
 
 from __future__ import annotations
@@ -916,7 +917,6 @@ def main() -> None:
     config = load_config_file(arguments.config)
     stock_codes = arguments.codes.split(",") if arguments.codes else require_config_value(config, "stocks", arguments.config, "--codes")
     frequency = arguments.frequency
-    default_start_date = require_config_value(config, "default_start_date", arguments.config)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     output_root = resolve_output_root(arguments.output_root, config, arguments.config)
 
@@ -929,6 +929,7 @@ def main() -> None:
                 logged_in = True
 
             if arguments.command == "update":
+                default_start_date = require_config_value(config, "default_start_date", arguments.config)
                 run_update(connection, stock_codes, frequency, output_root,
                            arguments.start, arguments.end or time.strftime("%Y-%m-%d"), default_start_date)
             elif arguments.command == "merge-month":
