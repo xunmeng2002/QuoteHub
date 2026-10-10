@@ -36,7 +36,7 @@ import sqlite3
 
 # ---------- 配置 ----------
 
-CONFIG_FILE = "config.json"
+CONFIG_FILE = "BaoStock.json"
 DB_PATH = "stock_data.db"
 LOG_LEVEL = logging.INFO
 MAX_LOGIN_RETRIES = 5

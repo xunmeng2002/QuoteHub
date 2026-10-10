@@ -35,7 +35,6 @@ Parquet 文件成为数据库的纯再导出（不做文件侧合并），从根
 import argparse
 import calendar
 import fnmatch
-import json
 import logging
 import os
 import sqlite3
@@ -49,13 +48,13 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from BaoStock import DB_PATH, _collect_rows, init_database, login_with_retry, require_config_value
+from BaoStock import DB_PATH, _collect_rows, init_database, load_config_file, login_with_retry, require_config_value
 
 logger = logging.getLogger(__name__)
 
 # ---------- 配置 ----------
 
-CONFIG_FILE = "config.json"
+CONFIG_FILE = "BaoStockParquet.json"
 CONFIG_KEY_OUTPUT_ROOT = "parquet_output_root"
 DEFAULT_FREQUENCY = "5"
 
@@ -124,11 +123,6 @@ def to_sqlite_value(value: Any) -> Any:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
     return value
-
-
-def load_config(config_file: str) -> dict[str, Any]:
-    with open(config_file, "r", encoding="utf-8") as config_handle:
-        return json.load(config_handle)
 
 
 def resolve_output_root(command_line_output_root: str | None, config: dict[str, Any], config_file: str) -> str:
@@ -702,7 +696,7 @@ def parse_arguments() -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def add_common_arguments(sub_parser: argparse.ArgumentParser) -> None:
-        sub_parser.add_argument("--config", default=CONFIG_FILE, help="配置文件路径（提供 stocks / default_start_date / parquet_output_root）")
+        sub_parser.add_argument("--config", default=CONFIG_FILE, help=f"配置文件路径，缺省 {CONFIG_FILE}（提供 stocks / default_start_date / parquet_output_root）")
         sub_parser.add_argument("--codes", default=None, help="逗号分隔的证券代码，缺省取配置文件 stocks")
         sub_parser.add_argument("--frequency", default=DEFAULT_FREQUENCY, choices=["5", "15", "30", "60"], help="分钟频率")
         sub_parser.add_argument("--output-root", default=None, help=f"Parquet 输出根目录（相对当前工作目录）；缺省取配置 {CONFIG_KEY_OUTPUT_ROOT}，两处都无则报错退出")
@@ -730,7 +724,7 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> None:
     arguments = parse_arguments()
-    config = load_config(arguments.config)
+    config = load_config_file(arguments.config)
     stock_codes = arguments.codes.split(",") if arguments.codes else require_config_value(config, "stocks", arguments.config, "--codes")
     frequency = arguments.frequency
     default_start_date = config.get("default_start_date", "2015-01-01")
