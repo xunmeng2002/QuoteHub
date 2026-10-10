@@ -238,7 +238,7 @@ def query_minute_bars(stock_code: str, start_date: str, end_date: str, frequency
         minute_frame[column] = pd.to_numeric(minute_frame[column], errors="coerce")
     invalid_count = int(minute_frame["close"].isna().sum())
     if invalid_count > 0:
-        logger.warning(f"{stock_code} 有 {invalid_count} 根分钟 bar 价格缺失（停牌等），已丢弃")
+        logger.warning("%s 有 %s 根分钟 bar 价格缺失（停牌等），已丢弃", stock_code, invalid_count)
         minute_frame = minute_frame.dropna(subset=["close"])
     return minute_frame.sort_values("time").reset_index(drop=True)
 
@@ -452,7 +452,7 @@ def ingest_stock(connection: sqlite3.Connection, stock_code: str, frequency: str
     upsert_trading_day_stats(connection, stock_code, daily_frame)
     upsert_queried_bar_span(connection, stock_code, frequency, start_date, end_date)
     connection.commit()
-    logger.info(f"{stock_code} 入库 {len(minute_frame)} 根 {frequency} 分钟 bar / {len(daily_frame)} 个交易日统计（{start_date} ~ {end_date}）")
+    logger.info("%s 入库 %s 根 %s 分钟 bar / %s 个交易日统计（%s ~ %s）", stock_code, len(minute_frame), frequency, len(daily_frame), start_date, end_date)
     return sorted(minute_frame["date"].unique())
 
 
@@ -542,7 +542,7 @@ def build_bar_frame(minute_frame: pd.DataFrame, daily_frame: pd.DataFrame, excha
         closes = day_bars["close"].tolist()
         daily_row = daily_frame.loc[trading_day] if trading_day in daily_frame.index else None
         if daily_row is None:
-            logger.warning(f"{exchange_id}.{instrument_id} {trading_day} 无日线 preclose，沿用前收盘")
+            logger.warning("%s.%s %s 无日线 preclose，沿用前收盘", exchange_id, instrument_id, trading_day)
         pre_close = float(daily_row["preclose"]) if daily_row is not None and not pd.isna(daily_row["preclose"]) else previous_close
 
         volume_cumulative = detect_cumulative_mode(
@@ -670,10 +670,10 @@ def archive_file(file_path: str) -> None:
     os.makedirs(archive_dir, exist_ok=True)
     target_path = os.path.join(archive_dir, os.path.basename(file_path))
     if os.path.exists(target_path):
-        logger.warning(f"archive 内已存在同名文件，两侧均保留不动: {target_path}")
+        logger.warning("archive 内已存在同名文件，两侧均保留不动: %s", target_path)
         return
     os.rename(file_path, target_path)
-    logger.info(f"归档 {file_path} → {target_path}")
+    logger.info("归档 %s → %s", file_path, target_path)
 
 
 def archive_matching_files(directory: str, patterns: list[str]) -> None:
@@ -704,13 +704,13 @@ def write_mismatch_report(target_file: str, period: str, frequency: str, mismatc
     """
     for record in mismatch_records:
         if abs(record["DeviationPercent"]) > 5:
-            logger.warning(f"{record['InstrumentID']} {record['TradingDay']} 分钟量与日量偏差 {record['DeviationPercent']}%，超过 5%")
+            logger.warning("%s %s 分钟量与日量偏差 %s%%，超过 5%%", record['InstrumentID'], record['TradingDay'], record['DeviationPercent'])
     if not mismatch_records:
         return
     report_file = os.path.join(os.path.dirname(target_file), f"{period}_{frequency}m_mismatch.csv")
     report_frame = pd.DataFrame(mismatch_records).sort_values(["InstrumentID", "TradingDay"])
     report_frame.to_csv(report_file, index=False, encoding="utf-8-sig")
-    logger.warning(f"{os.path.basename(target_file)} 共 {len(mismatch_records)} 天分钟量与日量偏差超 1%，明细见 {report_file}")
+    logger.warning("%s 共 %s 天分钟量与日量偏差超 1%%，明细见 %s", os.path.basename(target_file), len(mismatch_records), report_file)
 
 
 def warn_coverage_shrink(connection: sqlite3.Connection, frequency: str, start_day: str, end_day: str, target_file: str) -> None:
@@ -734,7 +734,7 @@ def warn_coverage_shrink(connection: sqlite3.Connection, frequency: str, start_d
     period_min = int(start_day.replace("-", ""))
     period_max = int(end_day.replace("-", ""))
     if existing_min < period_min or existing_max > period_max:
-        logger.warning(f"{target_file} 既有覆盖 {existing_min}~{existing_max} 超出本次导出区间 {period_min}~{period_max}，重写将收缩范围")
+        logger.warning("%s 既有覆盖 %s~%s 超出本次导出区间 %s~%s，重写将收缩范围", target_file, existing_min, existing_max, period_min, period_max)
     row = connection.execute(
         "SELECT MIN(TradingDay), MAX(TradingDay) FROM MinuteBars WHERE Frequency = ? AND TradingDay >= ? AND TradingDay <= ?",
         (frequency, start_day, end_day),
@@ -744,7 +744,7 @@ def warn_coverage_shrink(connection: sqlite3.Connection, frequency: str, start_d
     database_min = int(row[0].replace("-", ""))
     database_max = int(row[1].replace("-", ""))
     if existing_min < database_min or existing_max > database_max:
-        logger.warning(f"{target_file} 既有覆盖 {existing_min}~{existing_max} 超出库中数据 {database_min}~{database_max}，重写将丢失库外天数")
+        logger.warning("%s 既有覆盖 %s~%s 超出库中数据 %s~%s，重写将丢失库外天数", target_file, existing_min, existing_max, database_min, database_max)
 
 
 # ---------- 导出（数据库 → Parquet，唯一出口） ----------
@@ -778,13 +778,13 @@ def export_bars_from_database(connection: sqlite3.Connection, output_root: str, 
         frames.append(bar_frame)
         mismatch_records.extend(code_mismatches)
     if not frames:
-        logger.warning(f"{exchange_id} {start_day} ~ {end_day} 库中无 {frequency} 分钟数据，跳过导出")
+        logger.warning("%s %s ~ %s 库中无 %s 分钟数据，跳过导出", exchange_id, start_day, end_day, frequency)
         return
     merged_frame = pd.concat(frames, ignore_index=True)
     target_file = bar_file_path(output_root, exchange_id, period, frequency)
     warn_coverage_shrink(connection, frequency, start_day, end_day, target_file)
     write_bar_file(target_file, merged_frame)
-    logger.info(f"写入 {target_file}（{len(merged_frame)} 行，{start_day} ~ {end_day}）")
+    logger.info("写入 %s（%s 行，%s ~ %s）", target_file, len(merged_frame), start_day, end_day)
     write_mismatch_report(target_file, period, frequency, mismatch_records)
     archive_matching_files(os.path.dirname(target_file), archive_patterns)
 
@@ -811,7 +811,7 @@ def run_update(connection: sqlite3.Connection, stock_codes: list[str], frequency
     for stock_code in stock_codes:
         effective_start = start_date or get_last_trading_day(connection, stock_code, frequency) or default_start_date
         if effective_start > end_date:
-            logger.info(f"{stock_code} 已是最新（库中最后交易日 {effective_start} 不早于 {end_date}），跳过")
+            logger.info("%s 已是最新（库中最后交易日 %s 不早于 %s），跳过", stock_code, effective_start, end_date)
             continue
         trading_days = ingest_stock(connection, stock_code, frequency, effective_start, end_date)
         exchange_id, _ = split_stock_code(stock_code)
