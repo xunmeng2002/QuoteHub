@@ -30,7 +30,7 @@ SQLite（stock_data.db，唯一事实源，主键 UPSERT 幂等）
 
 - 文件名带频率后缀（`_5m` / `_15m` / `_30m` / `_60m`），四种频率可并存于同一目录。
 - Parquet 文件不可修改，因此当月只新增日度文件；合并一律从数据库整段重新导出。
-- **写入粒度是"交易所 × 时间段"**：一个 Parquet 文件 = 一个交易所的一个周期段（日 / 月 / 年），文件内包含本次命令代码清单（缺省 = `bao_stock_parquet.json` 全部）中该交易所所有代码的 bar，用 `InstrumentID` 列区分个股。不存在按单合约写文件的模式。
+- **写入粒度是"交易所 × 时间段"**：一个 Parquet 文件 = 一个交易所的一个周期段（日 / 月 / 年），文件内包含本次命令代码清单（缺省 = `config.json` 全部）中该交易所所有代码的 bar，用 `InstrumentID` 列区分个股。不存在按单合约写文件的模式。
 
 ## 2 环境准备
 
@@ -44,7 +44,7 @@ pip install baostock pandas pyarrow
 
 > **注意**：必须在 `D:\Gitee\QuoteHub` 目录下运行。SQLite 路径是相对路径 `stock_data.db`，换目录运行会另建一个空库。
 
-### 2.3 配置文件（bao_stock_parquet.json）
+### 2.3 配置文件（config.json）
 
 | 键 | 说明 | 缺省 |
 | --- | --- | --- |
@@ -52,7 +52,7 @@ pip install baostock pandas pyarrow
 | `default_start_date` | 库中无数据时的默认回补起点 | 代码兜底 `2015-01-01` |
 | `parquet_output_root` | Parquet 输出根目录 | **无（必填）** |
 
-> **警告**：`stocks` 在两个脚本的配置里**各存一份，互不引用**。两个脚本共用 `stock_data.db`，但各自只按自己那份清单取数；本管线导出写文件时是"以交易所为单位整文件重写"，文件内容 = **本配置**的清单全集。**两处清单需自行保持一致**——只加了 `bao_stock.json` 而漏加本配置，导出的 Parquet 里就没有那只票，且不会有任何提示。改清单时请两份一起改。
+> **注意**：`config.json` 由 `bao_stock.py` 与 `bao_stock_parquet.py` **共用一份**，`stocks` 全仓只此一处。两脚本共用 `stock_data.db`，日线采集与分钟线导出读的是同一份清单，结构上不可能不一致。本管线导出写文件时"以交易所为单位整文件重写"，文件内容 = 本配置的清单全集；清单里没有的票，导出的 Parquet 里也不会有。改清单 = 改这一处。
 
 ```json
 {
@@ -126,13 +126,13 @@ python bao_stock_parquet.py backfill --start 2024-01-01 --end 2024-12-31
 | 每月初 | `merge-month` | 不联网 | 无 | 整月重写月度文件，日度文件入 archive |
 | 每年初 | `merge-year` | 不联网 | 无 | 整年重写年度文件，月度 / 残留日度入 archive |
 
-1. **首次建库**：配置 `bao_stock_parquet.json` 的 stocks，执行 `backfill --start <起始日>`（`--end` 缺省今天）。
+1. **首次建库**：配置 `config.json` 的 stocks，执行 `backfill --start <起始日>`（`--end` 缺省今天）。
 2. **每日收盘后**：执行 `update`（自动续传；节假日无数据自然跳过）。
 3. **每月初**：执行 `merge-month`（缺省即上月）。
 4. **每年初**：执行 `merge-year`（缺省即去年）。
 5. **换频率**：`--frequency 15` 再走一遍建库流程即可，文件按后缀与 5 分钟数据并存；但同一回测根目录内不要混放多频率（见第 5 节）。
 
-> **注意**：导出写文件以交易所为单位——若用 `--codes` 只传一只，写出的文件会被重写为只含这一只（该交易所其他代码的行被挤出文件，库里不丢）。加新股票请先进 `bao_stock_parquet.json` 再跑全集，保持"文件 = 配置全集的再导出"。
+> **注意**：导出写文件以交易所为单位——若用 `--codes` 只传一只，写出的文件会被重写为只含这一只（该交易所其他代码的行被挤出文件，库里不丢）。加新股票请先进 `config.json` 再跑全集，保持"文件 = 配置全集的再导出"。
 
 ## 5 回测接入（QuantTrading 侧）
 
