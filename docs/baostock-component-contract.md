@@ -53,7 +53,7 @@ python bao_stock_parquet.py backfill --start <YYYY-MM-DD> --end <YYYY-MM-DD> --f
 | `--codes` | 省略会回落到配置的 `stocks`；消费方**应显式传全集**——导出按交易所整文件重写，少传一个就会把该合约从文件里挤掉（库里不丢） |
 | `--output-root` | **必须显式传**：不传会落到本仓 `config.json` 里的值 |
 
-选 `backfill` 而非 `update`：前者按区间直接写年度文件、不产生日度文件，与输出根现有的年度文件同构。
+选 `backfill` 而非 `update`：前者按区间直接写年度文件、不产生日度文件，与输出根现有的年度文件同构。若区间落入**尚未结束的当年**，该年改按月度文件写出（年度文件会与后续 `update`/`merge-month` 的日度、月度文件重复覆盖同一天，而回放 SQL 不去重）；当年的年度文件由次年的 `merge-year` 生成。另：`backfill` **不改动既有文件**，若某已结束年度已有 `merge-month` 产出的月度文件，再回补该年会让年度与月度文件同时被 `Year=*/*.parquet` 扫到，此时应改调 `merge-year`。
 
 ### 3.3 退出码与错误识别
 

@@ -1,8 +1,18 @@
-"""bao_stock_parquet.py 单元测试：纯函数（不碰数据库、网络与真实文件系统）。"""
+"""bao_stock_parquet.py 单元测试：纯函数与回补导出粒度（不碰网络、不碰真实输出根）。"""
 
 from __future__ import annotations
 
+import sqlite3
+
+from collections.abc import Iterator
+from contextlib import closing
+from datetime import date
+from pathlib import Path
+
 import pytest
+
+import bao_stock
+import bao_stock_parquet
 
 from bao_stock_parquet import (
     _spans_are_contiguous,
@@ -89,3 +99,45 @@ def test_detect_cumulative_mode_recognizes_intraday_cumulative() -> None:
 )
 def test_detect_cumulative_mode_defaults_to_incremental(bar_values: list[float], daily_total: float) -> None:
     assert detect_cumulative_mode(bar_values, daily_total) is False
+
+
+@pytest.fixture
+def initialized_connection(tmp_path: Path) -> Iterator[sqlite3.Connection]:
+    """建好表的临时库连接，用例结束即关闭。"""
+    with closing(sqlite3.connect(tmp_path / "test.db")) as connection:
+        bao_stock.init_database(connection)
+        yield connection
+
+def test_run_backfill_exports_in_progress_year_as_monthly_files(
+    initialized_connection: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回补带未结束年度时只写月度文件：年度文件会与当年 update/merge 的日度、月度文件重复覆盖同一天。"""
+    completed_year = date.today().year - 1
+    in_progress_year = str(date.today().year)
+    for trading_day in (f"{completed_year}-06-02", f"{in_progress_year}-10-09"):
+        initialized_connection.execute(
+            "INSERT INTO MinuteBars (Code, Frequency, TradingDay, Time, Open, High, Low, Close, Volume, Amount) "
+            "VALUES ('sh.600000', '5', ?, ?, '1', '1', '1', '1', '1', '1')",
+            (trading_day, trading_day.replace("-", "") + "150000000"),
+        )
+    initialized_connection.commit()
+    exported_months: list[str] = []
+    exported_periods: list[str] = []
+
+    monkeypatch.setattr(bao_stock_parquet, "ingest_stock", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        bao_stock_parquet, "run_merge_month",
+        lambda connection, stock_codes, frequency, output_root, month: exported_months.append(month),
+    )
+    monkeypatch.setattr(
+        bao_stock_parquet, "export_bars_from_database",
+        lambda *args, **kwargs: exported_periods.append(args[7]),
+    )
+
+    bao_stock_parquet.run_backfill(
+        initialized_connection, ["sh.600000"], "5", "unused-output-root",
+        f"{completed_year}-01-01", f"{in_progress_year}-12-31",
+    )
+
+    assert exported_months == [f"{in_progress_year}10"]
+    assert exported_periods == [str(completed_year)]

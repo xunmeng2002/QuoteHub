@@ -19,7 +19,7 @@ Parquet 文件成为数据库的纯再导出（不做文件侧合并），从根
     update      增量入库并写出当日 Parquet（缺省从库中最后交易日续传，含当日重拉自愈）
     merge-month [--month YYYYMM]   缺省上月：整月导出 + 归档日度文件
     merge-year  [--year YYYY]      缺省去年：整年导出 + 归档月度/日度文件
-    backfill --start --end         区间入库并直接写出年度 Parquet（不产生日度文件）
+    backfill --start --end         区间入库并直接写出 Parquet（不产生日度文件；未结束的当年写月度文件）
 
 注意：
     - BaoStock 仅有 5/15/30/60 分钟线，指数无分钟线，无 tick/1 分钟/盘口。
@@ -522,7 +522,9 @@ def build_bar_frame(minute_frame: pd.DataFrame, daily_frame: pd.DataFrame, excha
         volume = day_bars["volume"] if volume_cumulative else day_bars["volume"].cumsum()
         last_turnover = day_bars["amount"].diff().fillna(day_bars["amount"]) if amount_cumulative else day_bars["amount"]
         turnover = day_bars["amount"] if amount_cumulative else day_bars["amount"].cumsum()
-        # 分钟量合计与日量存在 ~0.4% 的固有口径差（大宗交易/集合竞价归属），>1% 记明细，>5% 逐日告警
+        # 分钟量合计与日量并非恒有口径差：2020–2022 与 2026 逐日精确相等，仅 2023–2025 有部分
+        # 交易日偏离（上游两套源表的生成差异，非导出错误），>1% 者集中在 1%~7%、单日最大约 7.3%。
+        # 偏差 >1% 记明细，>5% 逐日告警。
         if not volume_cumulative and daily_row is not None and not pd.isna(daily_row["volume"]):
             daily_volume = float(daily_row["volume"])
             minute_total = float(volume.iloc[-1])
@@ -829,8 +831,40 @@ def run_merge_year(connection: sqlite3.Connection, stock_codes: list[str], frequ
             f"{year}-01-01", f"{year}-12-31", year, archive_patterns,
         )
 
+def _query_backfilled_months(connection: sqlite3.Connection, stock_codes: list[str], frequency: str,
+                             start_date: str, end_date: str) -> list[str]:
+    """回补区间内库中实际有分钟数据的月份（'YYYY-MM'，升序），供月份与年份两种粒度共用。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_codes: 参与回补的证券代码列表；不可为空（空列表会构造出 `Code IN ()` 非法 SQL）。
+        frequency: 分钟频率。
+        start_date: 回补起始日期 'YYYY-MM-DD'。
+        end_date: 回补结束日期 'YYYY-MM-DD'。
+
+    Returns:
+        升序月份列表，如 ['2026-06', '2026-10']。
+    """
+    placeholders = ", ".join("?" * len(stock_codes))
+    rows = connection.execute(
+        f"SELECT DISTINCT substr(TradingDay, 1, 7) FROM MinuteBars "
+        f"WHERE Frequency = ? AND TradingDay >= ? AND TradingDay <= ? AND Code IN ({placeholders}) ORDER BY 1",
+        [frequency, start_date, end_date, *stock_codes],
+    ).fetchall()
+    return [month for (month,) in rows]
+
 def run_backfill(connection: sqlite3.Connection, stock_codes: list[str], frequency: str, output_root: str, start_date: str, end_date: str) -> None:
-    """区间入库并直接写出年度 Parquet（历史回补不产生日度文件）；仅触及回补区间相交的年份。
+    """区间入库并直接写出 Parquet（历史回补不产生日度文件）；仅触及回补区间相交的年份。
+
+    未结束的当前年度**不写年度文件，改写月度文件**（复用 `run_merge_month`）。理由：年度文件
+    一旦落盘就同时覆盖全年，而当年仍在按日 `update`、按月 `merge-month`，回测按
+    `Year=*/*.parquet` 扫描同一目录时，同一天会在年度文件与月度/日度文件里各出现一次
+    （`merge-month` 的归档模式只认 8 位日度文件，动不了 4 位的年度文件），而回放 SQL 不去重。
+    写到"当月"为止，交由次年的 `merge-year` 收成年度文件。
+
+    **已结束年度**仍写年度文件，且传入空的归档模式——本函数不动既有文件，故若该年已有
+    `merge-month` 产出的月度文件，年度文件与月度文件会同时被 `Year=*/*.parquet` 扫到（重复
+    回放）。回补因此适用于"该年尚无月度文件"的建库/补洞场景；已有月度文件时用 `merge-year`。
 
     Args:
         connection: 已打开的 SQLite 连接。
@@ -840,16 +874,22 @@ def run_backfill(connection: sqlite3.Connection, stock_codes: list[str], frequen
         start_date: 回补起始日期 'YYYY-MM-DD'。
         end_date: 回补结束日期 'YYYY-MM-DD'。
     """
+    if not stock_codes:
+        logger.warning("回补代码清单为空，跳过入库与导出")
+        return
     for stock_code in stock_codes:
         ingest_stock(connection, stock_code, frequency, start_date, end_date)
+    in_progress_year = str(datetime.today().year)
+    for month in _query_backfilled_months(connection, stock_codes, frequency, start_date, end_date):
+        if not month.startswith(in_progress_year):
+            continue
+        logger.info("回补区间含未结束年度 %s，%s 按月导出（年度文件留给次年 merge-year）", in_progress_year, month)
+        run_merge_month(connection, stock_codes, frequency, output_root, month.replace("-", ""))
     for exchange_id, exchange_codes in group_codes_by_exchange(stock_codes).items():
-        placeholders = ", ".join("?" * len(exchange_codes))
-        year_rows = connection.execute(
-            f"SELECT DISTINCT substr(TradingDay, 1, 4) FROM MinuteBars "
-            f"WHERE Frequency = ? AND TradingDay >= ? AND TradingDay <= ? AND Code IN ({placeholders}) ORDER BY 1",
-            [frequency, start_date, end_date, *exchange_codes],
-        ).fetchall()
-        for (year,) in year_rows:
+        exchange_months = _query_backfilled_months(connection, exchange_codes, frequency, start_date, end_date)
+        for year in dict.fromkeys(month[:4] for month in exchange_months):
+            if year == in_progress_year:
+                continue
             export_bars_from_database(
                 connection, output_root, frequency, exchange_id, exchange_codes,
                 f"{year}-01-01", f"{year}-12-31", year, archive_patterns=[],

@@ -25,6 +25,7 @@ from bao_stock import (
     BaostockUpdateAbortedError,
     _default_year_quarters,
     _exit_on_update_aborted,
+    _fetch_and_store_financial,
     _get_previous_trading_date,
     _quarter_window_start,
     _restrict_to_table_columns,
@@ -35,8 +36,10 @@ from bao_stock import (
     logout_quietly,
     read_version,
     require_config_value,
+    update_deposit_rates,
     update_index_constituents,
     update_industry,
+    update_trade_dates,
 )
 
 class _PagedResultSet:
@@ -67,6 +70,8 @@ class _PagedResultSet:
 
     def next(self) -> bool:
         while True:
+            if self._page_index >= len(self._pages):
+                return False
             if self._row_index + 1 < len(self._pages[self._page_index]):
                 self._row_index += 1
                 return True
@@ -248,13 +253,106 @@ def test_update_all_commits_downloaded_rows(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr(bao_stock, "fetch_and_store_stock", store_downloaded_row)
     monkeypatch.setattr(bao_stock, "logout_quietly", lambda: None)
 
-    bao_stock.update_all()
+    bao_stock._run_update(
+        lambda connection: bao_stock.update_all(connection, bao_stock.load_config_file(bao_stock.CONFIG_FILE))
+    )
 
     with closing(sqlite3.connect(database_path)) as reopened_connection:
         stored_rows = reopened_connection.execute("SELECT Code, Date FROM DailyRawPrices").fetchall()
 
     assert downloaded_rows == [("sh.600000", "2000-01-01")]
     assert stored_rows == [("sh.600000", "2000-01-01")]
+
+def test_update_trade_dates_keeps_calendar_when_upstream_returns_no_rows(
+    initialized_connection: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """上游 err=0 + 0 行时不得清空日历——旧实现先 DELETE 再查询，空结果早退后 DELETE 仍被随后的 commit 落盘。"""
+    initialized_connection.execute(
+        "INSERT INTO TradeDates (CalendarDate, IsTradingDay) VALUES ('2026-10-09', 1)"
+    )
+    monkeypatch.setattr(
+        bao_stock.bs, "query_trade_dates",
+        lambda start_date, end_date: _PagedResultSet([[]], fields=["calendar_date", "is_trading_day"]),
+    )
+
+    update_trade_dates(initialized_connection)
+    initialized_connection.commit()
+
+    stored_dates = initialized_connection.execute(
+        "SELECT CalendarDate, IsTradingDay FROM TradeDates"
+    ).fetchall()
+    assert stored_dates == [("2026-10-09", 1)]
+
+def test_update_index_constituents_keeps_snapshot_when_upstream_returns_no_rows(
+    initialized_connection: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """某指数 err=0 + 0 行时不得先删掉当日快照再 continue——先查后删才留下库里那份。"""
+    monkeypatch.setattr(
+        bao_stock.bs, "query_trade_dates",
+        lambda start_date, end_date: _PagedResultSet(
+            [[["2026-10-09", "1"]]], fields=["calendar_date", "is_trading_day"]
+        ),
+    )
+    for query_name in ("query_hs300_stocks", "query_sz50_stocks", "query_zz500_stocks"):
+        monkeypatch.setattr(
+            bao_stock.bs, query_name,
+            lambda query_date: _PagedResultSet([[]], fields=["updateDate", "code", "code_name"]),
+        )
+    initialized_connection.execute(
+        "INSERT INTO IndexConstituents (IndexCode, Code, CodeName, UpdateDate) "
+        "VALUES ('hs300', 'sh.600000', '浦发银行', '2026-10-09')"
+    )
+
+    update_index_constituents(initialized_connection)
+
+    stored_rows = initialized_connection.execute(
+        "SELECT IndexCode, Code, UpdateDate FROM IndexConstituents"
+    ).fetchall()
+    assert stored_rows == [("hs300", "sh.600000", "2026-10-09")]
+
+def test_run_update_logs_out_and_rolls_back_uncommitted_rows_when_aborted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """中止路径必须注销并丢掉未提交事务——「已提交的批次保留、未提交的回滚」是本次承诺的一部分。"""
+    database_path = tmp_path / "stock_data.db"
+    events: list[str] = []
+
+    class _SuccessfulLogin:
+        error_code: str = "0"
+
+    def insert_then_abort(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "INSERT INTO DailyRawPrices (Code, Date) VALUES ('sh.600000', '2026-10-09')"
+        )
+        events.append("inserted_uncommitted")
+        raise BaostockSessionLostError("用户未登录")
+
+    monkeypatch.setattr(bao_stock, "DB_PATH", str(database_path))
+    monkeypatch.setattr(bao_stock, "login_with_retry", lambda *args, **kwargs: _SuccessfulLogin())
+    monkeypatch.setattr(bao_stock, "logout_quietly", lambda: events.append("logout"))
+
+    with pytest.raises(SystemExit) as raised_error:
+        bao_stock._run_update(insert_then_abort)
+
+    assert raised_error.value.code == 1
+    assert events == ["inserted_uncommitted", "logout"]
+    with closing(sqlite3.connect(database_path)) as reopened_connection:
+        uncommitted_rows = reopened_connection.execute("SELECT COUNT(*) FROM DailyRawPrices").fetchone()
+    assert uncommitted_rows == (0,)
+
+def test_run_update_exits_nonzero_when_login_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """登录失败必须以退出码 1 收场——按退出码判成败的调用方不能把「什么都没做」当「做完了」。"""
+    monkeypatch.setattr(bao_stock, "DB_PATH", str(tmp_path / "stock_data.db"))
+    monkeypatch.setattr(bao_stock, "login_with_retry", lambda *args, **kwargs: None)
+
+    with pytest.raises(SystemExit) as raised_error:
+        bao_stock._run_update(lambda connection: None)
+
+    # SystemExit 携带字符串时解释器以状态 1 退出并把该串写进 stderr；两项都要，故断言内容而非 1。
+    assert raised_error.value.code != 0
+    assert "登录失败" in str(raised_error.value.code)
 
 def test_update_industry_keeps_own_update_date_and_survives_second_run(
     initialized_connection: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
@@ -327,3 +425,44 @@ def test_get_previous_trading_date_aborts_when_session_lost(monkeypatch: pytest.
 
     with pytest.raises(BaostockSessionLostError):
         _get_previous_trading_date()
+
+def test_fetch_and_store_financial_keeps_rows_when_upstream_returns_no_rows(
+    initialized_connection: sqlite3.Connection
+) -> None:
+    """单键财务表 err=0 + 0 行时不得删掉该键既有行——先查后删才留得住。"""
+    initialized_connection.execute(
+        "INSERT INTO BalanceData (Code, Year, Quarter, CurrentRatio) VALUES ('sh.600000', 2026, 2, 1.5)"
+    )
+    query_func = lambda code, year, quarter: _PagedResultSet(
+        [[]], fields=["code", "pubDate", "statDate", "currentRatio"]
+    )
+
+    written_rows = _fetch_and_store_financial(
+        initialized_connection, "sh.600000", 2026, 2, query_func, "BalanceData", ["CurrentRatio"]
+    )
+
+    assert written_rows == 0
+    stored_rows = initialized_connection.execute(
+        "SELECT Code, Year, Quarter, CurrentRatio FROM BalanceData"
+    ).fetchall()
+    assert stored_rows == [("sh.600000", 2026, 2, 1.5)]
+
+def test_update_deposit_rates_keeps_rows_when_upstream_returns_no_rows(
+    initialized_connection: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """清空重取的宏观表 err=0 + 0 行时不得整表清空——旧实现先 DELETE 全表再查询。"""
+    initialized_connection.execute(
+        "INSERT INTO DepositRates (PubDate, DemandDepositRate) VALUES ('2026-10-09', 0.35)"
+    )
+    monkeypatch.setattr(
+        bao_stock.bs, "query_deposit_rate_data",
+        lambda start_date: _PagedResultSet([[]], fields=["pubDate", "demandDepositRate"]),
+    )
+
+    update_deposit_rates(initialized_connection)
+    initialized_connection.commit()
+
+    stored_rows = initialized_connection.execute(
+        "SELECT PubDate, DemandDepositRate FROM DepositRates"
+    ).fetchall()
+    assert stored_rows == [("2026-10-09", 0.35)]

@@ -528,7 +528,7 @@ def _fetch_and_store_financial(connection: sqlite3.Connection, code: str, year: 
     """通用财务数据采集器。
 
     调用 Baostock 财务查询接口，将结果写入指定 SQLite 表。
-    写入前会删除相同 (Code, Year, Quarter) 的旧数据，故重跑幂等。
+    取到数据后才删除相同 (Code, Year, Quarter) 的旧数据，故重跑幂等；上游 0 行时保留库内现有数据。
 
     Args:
         connection: 已打开的 SQLite 连接。
@@ -545,16 +545,16 @@ def _fetch_and_store_financial(connection: sqlite3.Connection, code: str, year: 
     Raises:
         BaostockUpdateAbortedError: 结果集拉取不完整（未返回结果集、分页中断或会话失效）。
     """
+    result = query_func(code, str(year), str(quarter))
+    rows = collect_rows_or_raise(result, f"{code} {table_name} {year}Q{quarter}")
+    if not rows:
+        logger.info("%s %s %sQ%s 无数据，保留库内现有数据", code, table_name, year, quarter)
+        return 0
+
     connection.execute(
         f"DELETE FROM {table_name} WHERE Code = ? AND Year = ? AND Quarter = ?",
         (code, year, quarter),
     )
-
-    result = query_func(code, str(year), str(quarter))
-    rows = collect_rows_or_raise(result, f"{code} {table_name} {year}Q{quarter}")
-    if not rows:
-        logger.info("%s %s %sQ%s 无数据", code, table_name, year, quarter)
-        return 0
 
     frame = pd.DataFrame(rows, columns=result.fields)
     frame["Year"] = year
@@ -723,14 +723,15 @@ def update_dividend_data(connection: sqlite3.Connection, stock_codes: list[str],
     for code in stock_codes:
         for year in years:
             for year_type in ("report", "operate"):
-                connection.execute(
-                    "DELETE FROM DividendData WHERE Code=? AND Year=? AND YearType=?",
-                    (code, year, year_type),
-                )
                 result = bs.query_dividend_data(code, str(year), year_type)
                 rows = collect_rows_or_raise(result, f"{code} 除权除息 {year}/{year_type}")
                 if not rows:
                     continue
+
+                connection.execute(
+                    "DELETE FROM DividendData WHERE Code=? AND Year=? AND YearType=?",
+                    (code, year, year_type),
+                )
                 frame = pd.DataFrame(rows, columns=result.fields)
                 frame["Year"] = year
                 frame["YearType"] = year_type
@@ -783,16 +784,17 @@ def update_performance_express(connection: sqlite3.Connection, stock_codes: list
     for code in stock_codes:
         # 接口按公告日期过滤，会返回 StatDate 早于窗口起点的行（如 8 月公告的中报快报）；
         # 删除范围需同时覆盖 PubDate，否则重跑触发主键冲突
-        connection.execute(
-            "DELETE FROM PerformanceExpress WHERE Code=? AND (PubDate>=? OR StatDate>=?)",
-            (code, start_date, start_date),
-        )
         result = bs.query_performance_express_report(
             code, start_date=start_date, end_date=end_date
         )
         rows = collect_rows_or_raise(result, f"{code} 业绩快报 {start_date}~{end_date}")
         if not rows:
             continue
+
+        connection.execute(
+            "DELETE FROM PerformanceExpress WHERE Code=? AND (PubDate>=? OR StatDate>=?)",
+            (code, start_date, start_date),
+        )
         frame = pd.DataFrame(rows, columns=result.fields)
         frame = frame.rename(columns=column_map)
         frame["Year"] = frame["StatDate"].str[:4].astype(int)
@@ -841,16 +843,17 @@ def update_forecast_reports(connection: sqlite3.Connection, stock_codes: list[st
 
     for code in stock_codes:
         # 同业绩快报：接口按公告日期过滤，删除范围需同时覆盖 PubDate 保证重跑幂等
-        connection.execute(
-            "DELETE FROM ForecastReports WHERE Code=? AND (PubDate>=? OR StatDate>=?)",
-            (code, start_date, start_date),
-        )
         result = bs.query_forecast_report(
             code, start_date=start_date, end_date=end_date
         )
         rows = collect_rows_or_raise(result, f"{code} 业绩预告 {start_date}~{end_date}")
         if not rows:
             continue
+
+        connection.execute(
+            "DELETE FROM ForecastReports WHERE Code=? AND (PubDate>=? OR StatDate>=?)",
+            (code, start_date, start_date),
+        )
         frame = pd.DataFrame(rows, columns=result.fields)
         frame = frame.rename(columns=field_mapping)
         frame["Year"] = frame["StatDate"].str[:4].astype(int)
@@ -888,13 +891,10 @@ def update_index_constituents(connection: sqlite3.Connection) -> None:
     total = 0
 
     for index_code, query_func in indices:
-        connection.execute(
-            "DELETE FROM IndexConstituents WHERE IndexCode=? AND UpdateDate=?",
-            (index_code, query_date),
-        )
         result = query_func(query_date)
         rows = collect_rows_or_raise(result, f"{index_code} 成分股 {query_date}")
         if not rows:
+            logger.warning("%s 成分股 %s 上游返回 0 行，保留库内当日现有数据", index_code, query_date)
             continue
         frame = pd.DataFrame(rows, columns=result.fields)
         frame["IndexCode"] = index_code
@@ -905,6 +905,10 @@ def update_index_constituents(connection: sqlite3.Connection) -> None:
             frame, ["IndexCode", "Code", "CodeName", "UpdateDate"]
         )
         frame["UpdateDate"] = query_date
+        connection.execute(
+            "DELETE FROM IndexConstituents WHERE IndexCode=? AND UpdateDate=?",
+            (index_code, query_date),
+        )
         frame.to_sql("IndexConstituents", connection, if_exists="append", index=False)
         total += len(frame)
         logger.info("%s 成分股 %s 只", index_code, len(frame))
@@ -981,11 +985,10 @@ def update_trade_dates(connection: sqlite3.Connection, start_date: str = "1990-1
     if end_date is None:
         end_date = datetime.today().strftime("%Y-%m-%d")
 
-    connection.execute("DELETE FROM TradeDates WHERE CalendarDate >= ?", (start_date,))
-
     result = bs.query_trade_dates(start_date=start_date, end_date=end_date)
     rows = collect_rows_or_raise(result, f"交易日历 {start_date}~{end_date}")
     if not rows:
+        logger.warning("交易日历 %s~%s 上游返回 0 行，保留库内现有数据", start_date, end_date)
         return
 
     frame = pd.DataFrame(rows, columns=result.fields)
@@ -996,6 +999,7 @@ def update_trade_dates(connection: sqlite3.Connection, start_date: str = "1990-1
             "is_trading_day": "IsTradingDay",
         }
     )
+    connection.execute("DELETE FROM TradeDates WHERE CalendarDate >= ?", (start_date,))
     frame[["CalendarDate", "IsTradingDay"]].to_sql(
         "TradeDates", connection, if_exists="append", index=False
     )
@@ -1011,11 +1015,13 @@ def update_deposit_rates(connection: sqlite3.Connection) -> None:
     Args:
         connection: 已打开的 SQLite 连接。
     """
-    connection.execute("DELETE FROM DepositRates")
     result = bs.query_deposit_rate_data(start_date="2000-01-01")
     rows = collect_rows_or_raise(result, "存款利率")
     if not rows:
+        logger.warning("存款利率上游返回 0 行，保留库内现有数据")
         return
+
+    connection.execute("DELETE FROM DepositRates")
     frame = pd.DataFrame(rows, columns=result.fields)
     frame = frame.rename(
         columns={
@@ -1050,11 +1056,13 @@ def update_loan_rates(connection: sqlite3.Connection) -> None:
     Args:
         connection: 已打开的 SQLite 连接。
     """
-    connection.execute("DELETE FROM LoanRates")
     result = bs.query_loan_rate_data(start_date="2000-01-01")
     rows = collect_rows_or_raise(result, "贷款利率")
     if not rows:
+        logger.warning("贷款利率上游返回 0 行，保留库内现有数据")
         return
+
+    connection.execute("DELETE FROM LoanRates")
     frame = pd.DataFrame(rows, columns=result.fields)
     frame = frame.rename(
         columns={
@@ -1085,11 +1093,13 @@ def update_reserve_ratios(connection: sqlite3.Connection) -> None:
     Args:
         connection: 已打开的 SQLite 连接。
     """
-    connection.execute("DELETE FROM ReserveRatios")
     result = bs.query_required_reserve_ratio_data(start_date="2000-01-01")
     rows = collect_rows_or_raise(result, "准备金率")
     if not rows:
+        logger.warning("准备金率上游返回 0 行，保留库内现有数据")
         return
+
+    connection.execute("DELETE FROM ReserveRatios")
     frame = pd.DataFrame(rows, columns=result.fields)
     frame = frame.rename(
         columns={
@@ -1117,14 +1127,16 @@ def update_money_supply(connection: sqlite3.Connection) -> None:
     Args:
         connection: 已打开的 SQLite 连接。
     """
-    connection.execute("DELETE FROM MoneySupply")
     end_month = datetime.today().strftime("%Y-%m")
     result = bs.query_money_supply_data_month(
         start_date="2000-01", end_date=end_month
     )
     rows = collect_rows_or_raise(result, "货币供应量")
     if not rows:
+        logger.warning("货币供应量上游返回 0 行，保留库内现有数据")
         return
+
+    connection.execute("DELETE FROM MoneySupply")
     frame = pd.DataFrame(rows, columns=result.fields)
     frame = frame.rename(
         columns={
@@ -1180,14 +1192,14 @@ def _run_update(task_func: Callable[[sqlite3.Connection], None]) -> None:
         task_func: 接收 SQLite 连接的数据更新函数。
 
     Raises:
-        SystemExit: 任务被中止时以退出码 1 退出。
+        SystemExit: 登录失败或任务被中止时以退出码 1 退出。两者同码是刻意的：调用方按
+            退出码判成败，登录失败若以 0 收场，消费方会把“什么都没做”当成“做完了”。
     """
     with contextlib.closing(sqlite3.connect(DB_PATH)) as connection:
         init_database(connection)
         login_result = login_with_retry()
         if login_result is None:
-            logger.error("Baostock 登录失败，操作取消")
-            return
+            raise SystemExit("BaoStock 登录失败，操作取消")
         try:
             task_func(connection)
             connection.commit()
@@ -1340,53 +1352,43 @@ def read_version() -> str:
                 return version_line.strip()
     raise SystemExit(f"版本文件为空: {version_path}")
 
-def update_all() -> None:
+def update_all(connection: sqlite3.Connection, config: JsonObject) -> None:
     """遍历配置中的股票代码，增量更新行情数据。
 
+    Args:
+        connection: 已打开的 SQLite 连接。
+        config: 解析后的配置字典，须含 stocks 与 default_start_date 键。
+
     Raises:
-        SystemExit: 行情结果集拉取不完整时以退出码 1 退出。
+        BaostockUpdateAbortedError: 结果集拉取不完整，交由 `_run_update` 转成退出码 1。
 
     Note:
         逐只提交：原先只在连接关闭时收尾，而关闭不提交等于整轮回滚——下载半天一行不落库。
+        “登录 → 中止转换 → 注销”这段编排归 `_run_update` 统一承担，本函数只做任务本身。
     """
-    config = load_config_file(CONFIG_FILE)
     stock_codes: list[str] = require_config_value(config, "stocks", CONFIG_FILE)
     default_start: str = require_config_value(config, "default_start_date", CONFIG_FILE)
 
-    with contextlib.closing(sqlite3.connect(DB_PATH)) as connection:
-        init_database(connection)
+    sync_securities(connection)
 
-        login_result = login_with_retry()
-        if login_result is None:
-            logger.error("Baostock 登录失败，程序退出")
-            return
+    for stock_code in stock_codes:
+        logger.info("处理 %s ...", stock_code)
+        last_date = get_last_date(connection, stock_code)
+        if last_date:
+            start = (
+                datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=1)
+            ).strftime("%Y-%m-%d")
+            logger.info("  上次数据截止 %s，从 %s 开始增量下载", last_date, start)
+        else:
+            start = default_start
+            logger.info("  无历史数据，从默认日期 %s 开始全量下载", start)
 
-        try:
-            sync_securities(connection)
+        if datetime.strptime(start, "%Y-%m-%d") > datetime.today():
+            logger.info("  %s 已是最新，跳过", stock_code)
+            continue
 
-            for stock_code in stock_codes:
-                logger.info("处理 %s ...", stock_code)
-                last_date = get_last_date(connection, stock_code)
-                if last_date:
-                    start = (
-                        datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=1)
-                    ).strftime("%Y-%m-%d")
-                    logger.info("  上次数据截止 %s，从 %s 开始增量下载", last_date, start)
-                else:
-                    start = default_start
-                    logger.info("  无历史数据，从默认日期 %s 开始全量下载", start)
-
-                if datetime.strptime(start, "%Y-%m-%d") > datetime.today():
-                    logger.info("  %s 已是最新，跳过", stock_code)
-                    continue
-
-                fetch_and_store_stock(connection, stock_code, start)
-                connection.commit()
-        except BaostockUpdateAbortedError as abort_error:
-            _exit_on_update_aborted(abort_error)
-        finally:
-            logout_quietly()
-            logger.info("Baostock 注销")
+        fetch_and_store_stock(connection, stock_code, start)
+        connection.commit()
 
 # ---------- 入口 ----------
 
@@ -1397,20 +1399,10 @@ if __name__ == "__main__":
     if "--version" in sys.argv:
         print(read_version())
     elif "--update" in sys.argv:
-        update_all()
+        config = load_config_file(CONFIG_FILE)
+        _run_update(lambda conn: update_all(conn, config))
     elif "--sync-securities" in sys.argv:
-        with contextlib.closing(sqlite3.connect(DB_PATH)) as connection:
-            init_database(connection)
-            login_result = login_with_retry()
-            if login_result is None:
-                logger.error("Baostock 登录失败，证券同步无法继续")
-            else:
-                try:
-                    sync_securities(connection)
-                except BaostockUpdateAbortedError as abort_error:
-                    _exit_on_update_aborted(abort_error)
-                finally:
-                    logout_quietly()
+        _run_update(sync_securities)
     elif "--update-all" in sys.argv:
         config = load_config_file(CONFIG_FILE)
         _run_update(lambda conn: update_all_extended(conn, config))
