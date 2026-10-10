@@ -502,8 +502,8 @@ def _default_year_quarters() -> list[tuple[int, int]]:
 def _quarter_window_start(quarters_back: int = 4) -> str:
     """最近 quarters_back 个季度窗口的起始日期（最早那季的首日），供按日期区间查询的接口使用。"""
     today = datetime.today()
-    quarter_start_month = (today.month - 1) // 3 * 3 + 1
-    total_months = today.year * 12 + quarter_start_month - quarters_back * 3
+    quarter_start_month_index = (today.month - 1) // 3 * 3
+    total_months = today.year * 12 + quarter_start_month_index - quarters_back * 3
     return f"{total_months // 12:04d}-{total_months % 12 + 1:02d}-01"
 
 
