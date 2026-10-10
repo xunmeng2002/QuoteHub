@@ -51,7 +51,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from bao_stock import DB_PATH, _collect_rows, init_database, load_config_file, login_with_retry, require_config_value
+from bao_stock import DB_PATH, JsonObject, _collect_rows, init_database, load_config_file, login_with_retry, require_config_value
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ def to_sqlite_value(value: Any) -> Any:
         return None
     return value
 
-def resolve_output_root(command_line_output_root: str | None, config: dict[str, Any], config_file: str) -> str:
+def resolve_output_root(command_line_output_root: str | None, config: JsonObject, config_file: str) -> str:
     """解析 Parquet 输出根为绝对路径，并把生效值记进日志。
 
     取值只有两个来源：命令行 `--output-root`、配置键 `parquet_output_root`（必填，见
@@ -511,8 +511,8 @@ def build_bar_frame(minute_frame: pd.DataFrame, daily_frame: pd.DataFrame, excha
         (bar_frame, mismatch_records)：前者列序对齐 BAR_PARQUET_SCHEMA，
         后者为分钟量合计与日线量偏差 >1% 的交易日明细。
     """
-    rows: list[dict[str, Any]] = []
-    mismatch_records: list[dict[str, Any]] = []
+    rows: list[JsonObject] = []
+    mismatch_records: list[JsonObject] = []
     previous_close = None
     for trading_day, day_bars in minute_frame.groupby("date", sort=True):
         day_bars = day_bars.sort_values("time")
@@ -663,7 +663,7 @@ def archive_matching_files(directory: str, patterns: list[str]) -> None:
         if any(fnmatch.fnmatch(file_name, pattern) for pattern in patterns):
             archive_file(file_path)
 
-def write_mismatch_report(target_file: str, period: str, frequency: str, mismatch_records: list[dict[str, Any]]) -> None:
+def write_mismatch_report(target_file: str, period: str, frequency: str, mismatch_records: list[JsonObject]) -> None:
     """将分钟量与日线量偏差 >1% 的交易日明细写成同目录 CSV（正偏差 = 分钟多于日线），>5% 的天逐日告警。
 
     Args:
@@ -734,7 +734,7 @@ def export_bars_from_database(connection: sqlite3.Connection, output_root: str, 
         archive_patterns: 写出后需归档的 glob 模式；日度导出传空列表。
     """
     frames: list[pd.DataFrame] = []
-    mismatch_records: list[dict[str, Any]] = []
+    mismatch_records: list[JsonObject] = []
     for stock_code in stock_codes:
         minute_frame = load_minute_bars(connection, stock_code, frequency, start_day, end_day)
         if minute_frame.empty:

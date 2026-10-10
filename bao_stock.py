@@ -17,6 +17,13 @@
        python bao_stock.py --update-all          # 全量更新所有数据
        python bao_stock.py --update-financials   # 财务数据
        python bao_stock.py --update-macro        # 宏观经济数据
+
+关于 `Any`：本模块及其伴生脚本的 `Any` 只有两类来源，均属"类型系统无话可说"，不是偷懒——
+  - 第三方库不提供可用的精确类型：baostock 的 `ResultData` 与登录结果对象、pandas 的 DataFrame 单元格值，
+    都写不出类型名，基于它们的 `Callable` 返回值亦然；
+  - 配置项取值与 JSON 记录来自 `json.load()`，键集随调用方而异，用 `TypedDict` 固化反而失真。
+
+后者统一收敛为 `JsonObject` 别名。
 """
 
 from __future__ import annotations
@@ -44,6 +51,11 @@ MAX_LOGIN_RETRIES = 5
 RETRY_DELAY_SECONDS = 5
 
 logger = logging.getLogger(__name__)
+
+# ---------- 类型别名 ----------
+
+# 配置与 JSON 记录的形状（为什么用 Any 见模块 docstring「关于 Any」）
+type JsonObject = dict[str, Any]
 
 # ---------- 工具函数 ----------
 
@@ -1141,7 +1153,7 @@ def _run_update(task_func: Callable[[sqlite3.Connection], None]) -> None:
         finally:
             bs.logout()
 
-def update_all_extended(connection: sqlite3.Connection, config: dict[str, Any]) -> None:
+def update_all_extended(connection: sqlite3.Connection, config: JsonObject) -> None:
     """全量更新所有数据类别。
 
     Args:
@@ -1197,7 +1209,7 @@ def update_all_extended(connection: sqlite3.Connection, config: dict[str, Any]) 
 
 # ---------- 主流程 ----------
 
-def load_config(config_path: str) -> dict[str, Any]:
+def load_config(config_path: str) -> JsonObject:
     """读取 JSON 配置文件。
 
     Args:
@@ -1209,7 +1221,7 @@ def load_config(config_path: str) -> dict[str, Any]:
     with open(config_path, "r", encoding="utf-8") as file:
         return json.load(file)
 
-def load_config_file(config_file: str) -> dict[str, Any]:
+def load_config_file(config_file: str) -> JsonObject:
     """读取配置文件；文件不存在即报错退出——不伪造一份空配置顶上。
 
     原先文件缺失时返回 `{"stocks": []}`，于是"配置没写"与"配置写空"表现一致。
@@ -1227,7 +1239,7 @@ def load_config_file(config_file: str) -> dict[str, Any]:
         raise SystemExit(f"配置文件不存在: {config_file}")
     return load_config(config_file)
 
-def require_config_value(config: dict[str, Any], config_key: str, config_file: str, command_line_alternative: str | None = None) -> Any:
+def require_config_value(config: JsonObject, config_key: str, config_file: str, command_line_alternative: str | None = None) -> Any:
     """取必填配置项；缺失或为空即报错退出——配置一律不兜底。
 
     兜底会让"配置漏写"与"配置写对"表现一致：代码清单悄悄变空、输出路径悄悄落到别处，
