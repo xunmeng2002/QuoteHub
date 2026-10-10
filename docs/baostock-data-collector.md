@@ -46,7 +46,8 @@ python BaoStock.py [选项]        # 无参数打印用法
 ## 3 环境准备
 
 - 与管线脚本共用环境：在 `D:\Gitee\QuoteHub` 目录下运行（`stock_data.db` 与 `config.json` 均为相对路径），依赖 `baostock`、`pandas`。
-- `config.json` 的 `stocks` 是日 K / 财务 / 分红等按股票拉取命令的目标清单；`default_start_date` 是库内无历史数据时的下载起点（代码兜底 `2000-01-01`）。
+- `config.json` 的 `stocks` 是日 K / 财务 / 分红等按股票拉取命令的目标清单，**必填**：文件缺失、或键缺失/为空时脚本立即报错退出（`配置文件不存在: config.json` / `配置缺少必填项 stocks（config.json）`），不会静默跳过。与 `stocks` 无关的全市场级命令（`--update-index`、`--update-industry`、`--update-trade-dates`、`--update-macro`）不读配置，不受影响。
+- `default_start_date` 是库内无历史数据时的下载起点（该项**可省**，代码兜底 `2000-01-01`）。
 - 建表自动完成：`init_database` 依次执行 `sql/schema/Create_v1.0.0.sql` 与 `sql/upgrades/` 下全部升级脚本。
 
 ## 4 命令详解

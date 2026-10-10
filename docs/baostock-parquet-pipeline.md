@@ -50,14 +50,19 @@ pip install baostock pandas pyarrow
 | --- | --- | --- |
 | `stocks` | 证券代码列表，`sh.` / `sz.` 前缀 + 6 位代码 | 无（必填） |
 | `default_start_date` | 库中无数据时的默认回补起点 | 代码兜底 `2015-01-01` |
-| `parquet_output_root` | Parquet 输出根目录 | `D:/MdBaoStock` |
+| `parquet_output_root` | Parquet 输出根目录 | **无（必填）** |
 
 ```json
 {
   "stocks": ["sh.600000", "sh.600519", "sz.000001"],
-  "default_start_date": "2020-01-01"
+  "default_start_date": "2020-01-01",
+  "parquet_output_root": "../QuantTrading/MdBaoStock"
 }
 ```
+
+> **注意**：`parquet_output_root` **没有代码兜底**——配置里不写、命令行也不传 `--output-root`，脚本会立即报错退出，不会回退到任何写死的路径。这是刻意的：有兜底时"配置漏写"与"配置写对"表现一致，路径会悄悄落到别处，本键当初被误当成硬编码正是这个原因。
+
+> **注意**：`parquet_output_root` 是**相对当前工作目录**解析的，不是相对配置文件。故仍须在 QuoteHub 仓根运行（见 2.2）。示例值 `../QuantTrading/MdBaoStock` 指向 QuantTrading 仓根下的 `MdBaoStock`，与隔壁仓 `BackTest.json` 的 `MdDataPath` 指向同一实体。
 
 建表由 `BaoStock.init_database` 自动完成（`sql/upgrades/Update_v2.1.0.sql`），首次连接即生效，无需手工执行 SQL。
 
@@ -129,16 +134,20 @@ python BaoStockParquet.py backfill --start 2024-01-01 --end 2024-12-31
 
 ## 5 回测接入（QuantTrading 侧）
 
-回测运行配置（`QuantTrading/bin/Debug/BackTest.json`）改三处：
+回测运行配置的**源头**是 `QuantTrading/Configs/BackTest.json`，改三处：
 
 ```json
 {
   "MatchMode": 3,
-  "MdDataPath": "D:\\MdBaoStock",
+  "MdDataPath": "../../MdBaoStock",
   "StartTradingDay": "20241001",
   "EndTradingDay": "20241231"
 }
 ```
+
+> **警告**：运行时读的**不是** `Configs/` 这一份。QuantTrading 的 `CMakeLists.txt` 用 `copy_config_file(TestBackTest Configs/BackTest.json)` 在**构建时**把它拷进输出目录，回测进程实际读 `bin/<Config>/BackTest.json`。故改完 `Configs/` 后必须**重新配置/构建**（或直接改运行目录里那一份）才生效——**已存在的旧构建副本会一直停留在旧值**（本仓 `bin/Debug/BackTest.json` 至今仍是迁移前的 `D:\MdBaoStock`，正是这个原因）。
+
+> **注意**：`MdDataPath` 由 QuantTrading 按**相对 CWD** 的路径解析，而 CWD 是 `bin/<Config>`，故 `../../MdBaoStock` 落在 **QuantTrading 仓根**下的 `MdBaoStock` —— 与本管线导出根（`../QuantTrading/MdBaoStock`，相对 QuoteHub 仓根）是同一个目录。
 
 订阅配置（`TestBackTest.json` 等）使用交易所 + 6 位代码：
 

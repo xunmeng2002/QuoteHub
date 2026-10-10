@@ -28,6 +28,8 @@ Parquet 文件成为数据库的纯再导出（不做文件侧合并），从根
       ExchangeID 用 SSE/SZSE，InstrumentID 用 6 位代码（如 600519）。
     - SQLite 路径复用 BaoStock.DB_PATH（stock_data.db），须在 QuoteHub 目录下运行；
       建表由 BaoStock.init_database 自动应用（sql/upgrades/Update_v2.1.0.sql）。
+    - output_root 与代码清单均**无代码兜底**：由配置键 parquet_output_root / stocks
+      （或命令行 --output-root / --codes）提供，两处都缺即报错退出。
 """
 
 import argparse
@@ -47,14 +49,14 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from BaoStock import DB_PATH, _collect_rows, init_database, login_with_retry
+from BaoStock import DB_PATH, _collect_rows, init_database, login_with_retry, require_config_value
 
 logger = logging.getLogger(__name__)
 
 # ---------- 配置 ----------
 
 CONFIG_FILE = "config.json"
-DEFAULT_OUTPUT_ROOT = "D:/MdBaoStock"
+CONFIG_KEY_OUTPUT_ROOT = "parquet_output_root"
 DEFAULT_FREQUENCY = "5"
 
 MINUTE_K_FIELDS = "date,time,code,open,high,low,close,volume,amount"
@@ -127,6 +129,20 @@ def to_sqlite_value(value: Any) -> Any:
 def load_config(config_file: str) -> dict[str, Any]:
     with open(config_file, "r", encoding="utf-8") as config_handle:
         return json.load(config_handle)
+
+
+def resolve_output_root(command_line_output_root: str | None, config: dict[str, Any], config_file: str) -> str:
+    """解析 Parquet 输出根为绝对路径，并把生效值记进日志。
+
+    取值只有两个来源：命令行 `--output-root`、配置键 `parquet_output_root`（必填，见
+    `require_config_value`）。配置里的相对值按**当前工作目录**（而非配置文件所在目录）
+    解析，故归一化后打印生效值：否则在别的目录运行会在克隆旁静默建树（`os.makedirs`
+    不报错），回测侧看不到。
+    """
+    configured_output_root = command_line_output_root or require_config_value(config, CONFIG_KEY_OUTPUT_ROOT, config_file, "--output-root")
+    absolute_output_root = os.path.abspath(configured_output_root)
+    logger.info("Parquet 输出根: %s", absolute_output_root)
+    return absolute_output_root
 
 
 # ---------- BaoStock 拉取 ----------
@@ -689,7 +705,7 @@ def parse_arguments() -> argparse.Namespace:
         sub_parser.add_argument("--config", default=CONFIG_FILE, help="配置文件路径（提供 stocks / default_start_date / parquet_output_root）")
         sub_parser.add_argument("--codes", default=None, help="逗号分隔的证券代码，缺省取配置文件 stocks")
         sub_parser.add_argument("--frequency", default=DEFAULT_FREQUENCY, choices=["5", "15", "30", "60"], help="分钟频率")
-        sub_parser.add_argument("--output-root", default=None, help="Parquet 输出根目录，缺省取配置 parquet_output_root 或 D:/MdBaoStock")
+        sub_parser.add_argument("--output-root", default=None, help=f"Parquet 输出根目录（相对当前工作目录）；缺省取配置 {CONFIG_KEY_OUTPUT_ROOT}，两处都无则报错退出")
 
     update_parser = subparsers.add_parser("update", help="增量入库并写出当日 Parquet 文件")
     add_common_arguments(update_parser)
@@ -715,11 +731,11 @@ def parse_arguments() -> argparse.Namespace:
 def main() -> None:
     arguments = parse_arguments()
     config = load_config(arguments.config)
-    stock_codes = arguments.codes.split(",") if arguments.codes else config["stocks"]
-    output_root = arguments.output_root or config.get("parquet_output_root", DEFAULT_OUTPUT_ROOT)
+    stock_codes = arguments.codes.split(",") if arguments.codes else require_config_value(config, "stocks", arguments.config, "--codes")
     frequency = arguments.frequency
     default_start_date = config.get("default_start_date", "2015-01-01")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    output_root = resolve_output_root(arguments.output_root, config, arguments.config)
 
     connection = connect_database()
     logged_in = False

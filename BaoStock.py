@@ -1124,13 +1124,6 @@ def update_money_supply(connection: sqlite3.Connection) -> None:
 # ------------------------------------------------------------------
 
 
-def _load_config_safe() -> dict[str, Any]:
-    """安全加载配置，文件不存在时返回默认值。"""
-    if os.path.exists(CONFIG_FILE):
-        return load_config(CONFIG_FILE)
-    return {"stocks": [], "default_start_date": "2000-01-01"}
-
-
 def _run_update(task_func: Callable[[sqlite3.Connection], None]) -> None:
     """登录 Baostock → 执行任务 → 注销的统一流程。"""
     with sqlite3.connect(DB_PATH) as connection:
@@ -1150,7 +1143,7 @@ def update_all_extended(
     connection: sqlite3.Connection, config: dict[str, Any]
 ) -> None:
     """全量更新所有数据类别。"""
-    stock_codes: list[str] = config.get("stocks", [])
+    stock_codes: list[str] = require_config_value(config, "stocks", CONFIG_FILE)
 
     logger.info("===== 全量更新开始 =====")
 
@@ -1214,19 +1207,39 @@ def load_config(config_path: str) -> dict[str, Any]:
         return json.load(file)
 
 
+def load_config_file(config_file: str) -> dict[str, Any]:
+    """读取配置文件；文件不存在即报错退出——不伪造一份空配置顶上。
+
+    原先文件缺失时返回 `{"stocks": []}`，于是"配置没写"与"配置写空"表现一致。
+    """
+    if not os.path.exists(config_file):
+        raise SystemExit(f"配置文件不存在: {config_file}")
+    return load_config(config_file)
+
+
+def require_config_value(
+    config: dict[str, Any],
+    config_key: str,
+    config_file: str,
+    command_line_alternative: str | None = None,
+) -> Any:
+    """取必填配置项；缺失或为空即报错退出——配置一律不兜底。
+
+    兜底会让"配置漏写"与"配置写对"表现一致：代码清单悄悄变空、输出路径悄悄落到别处，
+    两者都没有任何提示。缺了就直接失败，把问题停在启动那一刻。
+    """
+    config_value = config.get(config_key)
+    if not config_value:
+        alternatives = f"，或用 {command_line_alternative} 传入" if command_line_alternative else ""
+        raise SystemExit(f"配置缺少必填项 {config_key}（{config_file}）{alternatives}")
+    return config_value
+
+
 def update_all() -> None:
     """遍历配置中的股票代码，增量更新行情数据。"""
-    if not os.path.exists(CONFIG_FILE):
-        logger.error(f"配置文件 {CONFIG_FILE} 不存在")
-        return
-
-    config = load_config(CONFIG_FILE)
-    stock_codes: list[str] = config.get("stocks", [])
+    config = load_config_file(CONFIG_FILE)
+    stock_codes: list[str] = require_config_value(config, "stocks", CONFIG_FILE)
     default_start: str = config.get("default_start_date", "2000-01-01")
-
-    if not stock_codes:
-        logger.warning("配置中未指定任何股票代码")
-        return
 
     with sqlite3.connect(DB_PATH) as connection:
         init_database(connection)
@@ -1282,23 +1295,22 @@ if __name__ == "__main__":
                 finally:
                     bs.logout()
     elif "--update-all" in sys.argv:
-        config = _load_config_safe()
+        config = load_config_file(CONFIG_FILE)
         _run_update(lambda conn: update_all_extended(conn, config))
     elif "--update-financials" in sys.argv:
-        config = _load_config_safe()
-        _run_update(
-            lambda conn: update_financial_data(conn, config.get("stocks", []))
-        )
+        config = load_config_file(CONFIG_FILE)
+        stock_codes = require_config_value(config, "stocks", CONFIG_FILE)
+        _run_update(lambda conn: update_financial_data(conn, stock_codes))
     elif "--update-dividends" in sys.argv:
-        config = _load_config_safe()
-        _run_update(
-            lambda conn: update_dividend_data(conn, config.get("stocks", []))
-        )
+        config = load_config_file(CONFIG_FILE)
+        stock_codes = require_config_value(config, "stocks", CONFIG_FILE)
+        _run_update(lambda conn: update_dividend_data(conn, stock_codes))
     elif "--update-reports" in sys.argv:
-        config = _load_config_safe()
+        config = load_config_file(CONFIG_FILE)
+        stock_codes = require_config_value(config, "stocks", CONFIG_FILE)
         def _update_reports(conn: sqlite3.Connection) -> None:
-            update_performance_express(conn, config.get("stocks", []))
-            update_forecast_reports(conn, config.get("stocks", []))
+            update_performance_express(conn, stock_codes)
+            update_forecast_reports(conn, stock_codes)
         _run_update(_update_reports)
     elif "--update-index" in sys.argv:
         _run_update(update_index_constituents)

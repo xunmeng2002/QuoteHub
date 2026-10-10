@@ -4,5 +4,6 @@
         "sh.600519",
         "sz.000001"
     ],
-    "default_start_date": "2020-01-01"
+    "default_start_date": "2020-01-01",
+    "parquet_output_root": "../QuantTrading/MdBaoStock"
 }
