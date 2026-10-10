@@ -15,18 +15,15 @@ from bao_stock import (
     require_config_value,
 )
 
-
 def test_require_config_value_returns_configured_value() -> None:
     config = {"stocks": ["sh.600519"]}
 
     assert require_config_value(config, "stocks", "bao_stock.json") == ["sh.600519"]
 
-
 @pytest.mark.parametrize("invalid_config", [{}, {"stocks": []}])
 def test_require_config_value_exits_on_missing_or_empty(invalid_config: dict[str, object]) -> None:
     with pytest.raises(SystemExit):
         require_config_value(invalid_config, "stocks", "bao_stock.json")
-
 
 def test_require_config_value_names_config_file_and_cli_alternative() -> None:
     with pytest.raises(SystemExit) as exit_info:
@@ -37,7 +34,6 @@ def test_require_config_value_names_config_file_and_cli_alternative() -> None:
     assert "bao_stock_parquet.json" in message
     assert "--output-root" in message
 
-
 def test_load_config_file_exits_when_file_missing(tmp_path) -> None:
     missing_config = tmp_path / "bao_stock.json"
 
@@ -46,13 +42,11 @@ def test_load_config_file_exits_when_file_missing(tmp_path) -> None:
 
     assert f"配置文件不存在: {missing_config}" in str(exit_info.value)
 
-
 def test_load_config_file_returns_parsed_json(tmp_path) -> None:
     config_path = tmp_path / "bao_stock.json"
     config_path.write_text(json.dumps({"stocks": ["sz.000001"]}), encoding="utf-8")
 
     assert load_config_file(str(config_path)) == {"stocks": ["sz.000001"]}
-
 
 def test_load_config_reads_json_file(tmp_path) -> None:
     config_path = tmp_path / "any.json"
@@ -60,14 +54,12 @@ def test_load_config_reads_json_file(tmp_path) -> None:
 
     assert load_config(str(config_path)) == {"stocks": []}
 
-
 def test_default_year_quarters_covers_four_ascending_quarters() -> None:
     quarters = _default_year_quarters()
 
     assert len(quarters) == 4
     assert quarters == sorted(quarters)
     assert all(1 <= quarter <= 4 for _, quarter in quarters)
-
 
 @pytest.mark.parametrize("quarters_back", [1, 2, 4, 8])
 def test_quarter_window_start_is_first_day_of_earliest_quarter(quarters_back: int) -> None:

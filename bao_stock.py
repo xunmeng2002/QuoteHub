@@ -45,9 +45,7 @@ RETRY_DELAY_SECONDS = 5
 
 logger = logging.getLogger(__name__)
 
-
 # ---------- 工具函数 ----------
-
 
 def _collect_rows(result_set: Any) -> list[list[str]]:
     """将 Baostock 结果集全部拉取为行列表。
@@ -67,9 +65,7 @@ def _collect_rows(result_set: Any) -> list[list[str]]:
         rows.append(result_set.get_row_data())
     return rows
 
-
 # ---------- Baostock 登录 ----------
-
 
 def login_with_retry(max_retries: int = MAX_LOGIN_RETRIES, delay: int = RETRY_DELAY_SECONDS) -> Any | None:
     """带重试地登录 Baostock。
@@ -91,9 +87,7 @@ def login_with_retry(max_retries: int = MAX_LOGIN_RETRIES, delay: int = RETRY_DE
             threading.Event().wait(delay)
     return None
 
-
 # ---------- 数据库初始化 ----------
-
 
 def init_database(connection: sqlite3.Connection) -> None:
     """初始化数据库：加载基础 Schema 后执行增量升级脚本，并迁移旧表结构。
@@ -141,9 +135,7 @@ def init_database(connection: sqlite3.Connection) -> None:
                 connection.executescript(migrate_file.read())
             logger.info("PerformanceExpress 旧结构（空表）已重建为 v2.2.0 列定义")
 
-
 # ---------- 交易日推算 ----------
-
 
 def _get_previous_trading_date(connection: sqlite3.Connection | None = None, lookback_days: int = 10) -> str | None:
     """推算最近一个交易日（不晚于昨天）。
@@ -195,9 +187,7 @@ def _get_previous_trading_date(connection: sqlite3.Connection | None = None, loo
     logger.warning("过去 10 天未找到交易日，将使用当天作为回退")
     return None
 
-
 # ---------- 查最新日期 ----------
-
 
 def get_last_date(connection: sqlite3.Connection, stock_code: str) -> str | None:
     """查库中该证券原始日线的最新日期，供增量下载算起点。
@@ -221,9 +211,7 @@ def get_last_date(connection: sqlite3.Connection, stock_code: str) -> str | None
     row = cursor.fetchone()
     return row[0] if row and row[0] else None
 
-
 # ---------- 下载并存储单只股票 ----------
-
 
 def fetch_and_store_stock(connection: sqlite3.Connection, stock_code: str, start_date: str) -> int:
     """下载单只股票的日K数据及复权因子，写入数据库。
@@ -301,9 +289,7 @@ def fetch_and_store_stock(connection: sqlite3.Connection, stock_code: str, start
     logger.info("%s 原始价格新增 %s 条", stock_code, len(price_frame))
     return len(price_frame)
 
-
 # ---------- 证券合约同步 ----------
-
 
 def sync_securities(connection: sqlite3.Connection) -> None:
     """同步全市场证券列表及交易状态（每日更新）。
@@ -444,11 +430,9 @@ def sync_securities(connection: sqlite3.Connection) -> None:
     connection.commit()
     logger.info("证券同步完成: 总数 %s, 新增 %s, 退市 %s", len(today_codes), len(new_codes), len(removed_codes))
 
-
 # ------------------------------------------------------------------
 # 通用财务数据采集器
 # ------------------------------------------------------------------
-
 
 def _fetch_and_store_financial(connection: sqlite3.Connection, code: str, year: int, quarter: int,
                                query_func: Callable[..., Any], table_name: str, numeric_fields: list[str]) -> int:
@@ -506,7 +490,6 @@ def _fetch_and_store_financial(connection: sqlite3.Connection, code: str, year: 
     logger.info("%s %s %sQ%s 写入 %s 条", code, table_name, year, quarter, len(frame))
     return len(frame)
 
-
 def _default_year_quarters() -> list[tuple[int, int]]:
     """获取最近 4 个季度的 (year, quarter) 列表（按时间升序）。
 
@@ -522,7 +505,6 @@ def _default_year_quarters() -> list[tuple[int, int]]:
         quarters.append((y, q))
     return list(reversed(quarters))
 
-
 def _quarter_window_start(quarters_back: int = 4) -> str:
     """最近 quarters_back 个季度窗口的起始日期（最早那季的首日），供按日期区间查询的接口使用。
 
@@ -537,11 +519,9 @@ def _quarter_window_start(quarters_back: int = 4) -> str:
     total_months = today.year * 12 + quarter_start_month_index - quarters_back * 3
     return f"{total_months // 12:04d}-{total_months % 12 + 1:02d}-01"
 
-
 # ------------------------------------------------------------------
 # 季频财务数据（6 类）
 # ------------------------------------------------------------------
-
 
 def update_financial_data(connection: sqlite3.Connection, stock_codes: list[str], years: list[int] | None = None,
                           quarters: list[int] | None = None) -> None:
@@ -617,11 +597,9 @@ def update_financial_data(connection: sqlite3.Connection, stock_codes: list[str]
                 )
     logger.info("财务数据更新完成，总写入 %s 条", total)
 
-
 # ------------------------------------------------------------------
 # 除权除息信息
 # ------------------------------------------------------------------
-
 
 def update_dividend_data(connection: sqlite3.Connection, stock_codes: list[str], years: list[int] | None = None) -> None:
     """下载除权除息信息。
@@ -685,11 +663,9 @@ def update_dividend_data(connection: sqlite3.Connection, stock_codes: list[str],
                 total += len(frame)
     logger.info("除权除息数据更新完成，总写入 %s 条", total)
 
-
 # ------------------------------------------------------------------
 # 业绩快报
 # ------------------------------------------------------------------
-
 
 def update_performance_express(connection: sqlite3.Connection, stock_codes: list[str], start_date: str | None = None,
                                end_date: str | None = None) -> None:
@@ -757,11 +733,9 @@ def update_performance_express(connection: sqlite3.Connection, stock_codes: list
         total += len(frame)
     logger.info("业绩快报更新完成，总写入 %s 条（%s ~ %s）", total, start_date, end_date)
 
-
 # ------------------------------------------------------------------
 # 业绩预告
 # ------------------------------------------------------------------
-
 
 def update_forecast_reports(connection: sqlite3.Connection, stock_codes: list[str], start_date: str | None = None,
                             end_date: str | None = None) -> None:
@@ -822,11 +796,9 @@ def update_forecast_reports(connection: sqlite3.Connection, stock_codes: list[st
         total += len(frame)
     logger.info("业绩预告更新完成，总写入 %s 条（%s ~ %s）", total, start_date, end_date)
 
-
 # ------------------------------------------------------------------
 # 指数成分股
 # ------------------------------------------------------------------
-
 
 def update_index_constituents(connection: sqlite3.Connection) -> None:
     """更新沪深300 / 上证50 / 中证500 成分股。
@@ -872,11 +844,9 @@ def update_index_constituents(connection: sqlite3.Connection) -> None:
 
     logger.info("指数成分股更新完成，总写入 %s 条", total)
 
-
 # ------------------------------------------------------------------
 # 行业分类
 # ------------------------------------------------------------------
-
 
 def update_industry(connection: sqlite3.Connection) -> None:
     """更新行业分类信息，同时更新 Securities 表中的行业字段。
@@ -933,11 +903,9 @@ def update_industry(connection: sqlite3.Connection) -> None:
 
     logger.info("行业分类更新完成，新增 %s 条，同步 Securities 行业信息 %s 条", len(frame), updated_count)
 
-
 # ------------------------------------------------------------------
 # 交易日历
 # ------------------------------------------------------------------
-
 
 def update_trade_dates(connection: sqlite3.Connection, start_date: str = "1990-12-19", end_date: str | None = None) -> None:
     """更新交易日历。
@@ -974,11 +942,9 @@ def update_trade_dates(connection: sqlite3.Connection, start_date: str = "1990-1
     )
     logger.info("交易日历更新完成，共 %s 条", len(frame))
 
-
 # ------------------------------------------------------------------
 # 宏观经济数据（5 类）
 # ------------------------------------------------------------------
-
 
 def update_deposit_rates(connection: sqlite3.Connection) -> None:
     """更新存款利率（清空重取，起始日固定 2000-01-01）。
@@ -1025,7 +991,6 @@ def update_deposit_rates(connection: sqlite3.Connection) -> None:
     frame.to_sql("DepositRates", connection, if_exists="append", index=False)
     logger.info("存款利率更新完成，共 %s 条", len(frame))
 
-
 def update_loan_rates(connection: sqlite3.Connection) -> None:
     """更新贷款利率（清空重取，起始日固定 2000-01-01）。
 
@@ -1067,7 +1032,6 @@ def update_loan_rates(connection: sqlite3.Connection) -> None:
     frame.to_sql("LoanRates", connection, if_exists="append", index=False)
     logger.info("贷款利率更新完成，共 %s 条", len(frame))
 
-
 def update_reserve_ratios(connection: sqlite3.Connection) -> None:
     """更新存款准备金率（清空重取，起始日固定 2000-01-01）。
 
@@ -1105,7 +1069,6 @@ def update_reserve_ratios(connection: sqlite3.Connection) -> None:
             frame[col] = pd.to_numeric(frame[col], errors="coerce")
     frame.to_sql("ReserveRatios", connection, if_exists="append", index=False)
     logger.info("存款准备金率更新完成，共 %s 条", len(frame))
-
 
 def update_money_supply(connection: sqlite3.Connection) -> None:
     """更新月度货币供应量（M0/M1/M2，清空重取，起始月固定 2000-01）。
@@ -1156,11 +1119,9 @@ def update_money_supply(connection: sqlite3.Connection) -> None:
     frame.to_sql("MoneySupply", connection, if_exists="append", index=False)
     logger.info("货币供应量更新完成，共 %s 条", len(frame))
 
-
 # ------------------------------------------------------------------
 # 全量更新调度
 # ------------------------------------------------------------------
-
 
 def _run_update(task_func: Callable[[sqlite3.Connection], None]) -> None:
     """登录 Baostock → 执行任务 → 注销的统一流程。
@@ -1179,7 +1140,6 @@ def _run_update(task_func: Callable[[sqlite3.Connection], None]) -> None:
             connection.commit()
         finally:
             bs.logout()
-
 
 def update_all_extended(connection: sqlite3.Connection, config: dict[str, Any]) -> None:
     """全量更新所有数据类别。
@@ -1235,9 +1195,7 @@ def update_all_extended(connection: sqlite3.Connection, config: dict[str, Any]) 
     connection.commit()
     logger.info("===== 全量更新完成 =====")
 
-
 # ---------- 主流程 ----------
-
 
 def load_config(config_path: str) -> dict[str, Any]:
     """读取 JSON 配置文件。
@@ -1250,7 +1208,6 @@ def load_config(config_path: str) -> dict[str, Any]:
     """
     with open(config_path, "r", encoding="utf-8") as file:
         return json.load(file)
-
 
 def load_config_file(config_file: str) -> dict[str, Any]:
     """读取配置文件；文件不存在即报错退出——不伪造一份空配置顶上。
@@ -1269,7 +1226,6 @@ def load_config_file(config_file: str) -> dict[str, Any]:
     if not os.path.exists(config_file):
         raise SystemExit(f"配置文件不存在: {config_file}")
     return load_config(config_file)
-
 
 def require_config_value(config: dict[str, Any], config_key: str, config_file: str, command_line_alternative: str | None = None) -> Any:
     """取必填配置项；缺失或为空即报错退出——配置一律不兜底。
@@ -1294,7 +1250,6 @@ def require_config_value(config: dict[str, Any], config_key: str, config_file: s
         alternatives = f"，或用 {command_line_alternative} 传入" if command_line_alternative else ""
         raise SystemExit(f"配置缺少必填项 {config_key}（{config_file}）{alternatives}")
     return config_value
-
 
 def update_all() -> None:
     """遍历配置中的股票代码，增量更新行情数据。"""
@@ -1333,7 +1288,6 @@ def update_all() -> None:
         finally:
             bs.logout()
             logger.info("Baostock 注销")
-
 
 # ---------- 入口 ----------
 

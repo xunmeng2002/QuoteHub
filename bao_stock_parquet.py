@@ -99,9 +99,7 @@ DECIMAL_COLUMNS = [field.name for field in BAR_PARQUET_SCHEMA if pa.types.is_dec
 
 STOCK_EXCHANGE_PREFIXES = {"sh": "SSE", "sz": "SZSE"}
 
-
 # ---------- 工具函数 ----------
-
 
 def split_stock_code(stock_code: str) -> tuple[str, str]:
     """拆分 'sh.600519' 为交易所代码与 6 位证券代码。
@@ -121,7 +119,6 @@ def split_stock_code(stock_code: str) -> tuple[str, str]:
         raise ValueError(f"无法识别的证券代码: {stock_code}（应为 sh.600519 / sz.000001 格式）")
     return exchange_id, instrument_id
 
-
 def group_codes_by_exchange(stock_codes: list[str]) -> dict[str, list[str]]:
     """按交易所分组证券代码（同一天/月/年的文件按交易所聚合全部代码）。
 
@@ -140,7 +137,6 @@ def group_codes_by_exchange(stock_codes: list[str]) -> dict[str, list[str]]:
         codes_by_exchange.setdefault(exchange_id, []).append(stock_code)
     return codes_by_exchange
 
-
 def to_sqlite_value(value: Any) -> Any:
     """NaN 一律转 None（SQLite 将 NaN 存为 NULL，显式转换避免依赖该隐式行为）。
 
@@ -153,7 +149,6 @@ def to_sqlite_value(value: Any) -> Any:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
     return value
-
 
 def resolve_output_root(command_line_output_root: str | None, config: dict[str, Any], config_file: str) -> str:
     """解析 Parquet 输出根为绝对路径，并把生效值记进日志。
@@ -179,9 +174,7 @@ def resolve_output_root(command_line_output_root: str | None, config: dict[str, 
     logger.info("Parquet 输出根: %s", absolute_output_root)
     return absolute_output_root
 
-
 # ---------- BaoStock 拉取 ----------
-
 
 def collect_rows_or_raise(result_set: Any, stock_code: str) -> list[list[str]]:
     """收集结果集；分页中途失败时**抛**，而不是静默截断。
@@ -206,7 +199,6 @@ def collect_rows_or_raise(result_set: Any, stock_code: str) -> list[list[str]]:
         raise RuntimeError(f"结果集分页中断: {stock_code} {result_set.error_msg}")
 
     return rows
-
 
 def query_minute_bars(stock_code: str, start_date: str, end_date: str, frequency: str) -> pd.DataFrame:
     """拉取分钟 K 线并转为数值 DataFrame（BaoStock 返回值全为字符串）。
@@ -242,7 +234,6 @@ def query_minute_bars(stock_code: str, start_date: str, end_date: str, frequency
         minute_frame = minute_frame.dropna(subset=["close"])
     return minute_frame.sort_values("time").reset_index(drop=True)
 
-
 def query_daily_bars(stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
     """拉取日线（取 preclose 供分钟 bar 首根回填，volume/amount 供口径交叉校验）。
 
@@ -272,7 +263,6 @@ def query_daily_bars(stock_code: str, start_date: str, end_date: str) -> pd.Data
         daily_frame[column] = pd.to_numeric(daily_frame[column], errors="coerce")
     return daily_frame.set_index("date")
 
-
 def detect_cumulative_mode(bar_values: list[float], daily_total: float) -> bool:
     """判别单日分钟量额是日内累计（True）还是本周期增量（False）。
 
@@ -293,9 +283,7 @@ def detect_cumulative_mode(bar_values: list[float], daily_total: float) -> bool:
     tolerance = max(1.0, abs(daily_total) * 1e-6)
     return monotonic and abs(bar_values[-1] - daily_total) <= tolerance
 
-
 # ---------- SQLite 入库 / 读取（事实源） ----------
-
 
 def connect_database() -> sqlite3.Connection:
     """打开数据库连接并确保 Schema 已就绪。
@@ -306,7 +294,6 @@ def connect_database() -> sqlite3.Connection:
     connection = sqlite3.connect(DB_PATH)
     init_database(connection)
     return connection
-
 
 def upsert_minute_bars(connection: sqlite3.Connection, stock_code: str, frequency: str, minute_frame: pd.DataFrame) -> None:
     """分钟 bar 原始值入库，主键（Code, Frequency, Time）保证重复拉取幂等。
@@ -333,7 +320,6 @@ def upsert_minute_bars(connection: sqlite3.Connection, stock_code: str, frequenc
         records,
     )
 
-
 def upsert_trading_day_stats(connection: sqlite3.Connection, stock_code: str, daily_frame: pd.DataFrame) -> None:
     """日度统计（preclose/volume/amount）入库，主键（Code, TradingDay）保证幂等。
 
@@ -351,7 +337,6 @@ def upsert_trading_day_stats(connection: sqlite3.Connection, stock_code: str, da
         "INSERT OR REPLACE INTO MinuteBarTradingDays (Code, TradingDay, Preclose, Volume, Amount) VALUES (?, ?, ?, ?, ?)",
         records,
     )
-
 
 def upsert_queried_bar_span(connection: sqlite3.Connection, stock_code: str, frequency: str, start_day: str, end_day: str) -> None:
     """把「这一次向上游问成功的日区间」并进该合约该频率的账。
@@ -388,7 +373,6 @@ def upsert_queried_bar_span(connection: sqlite3.Connection, stock_code: str, fre
         ],
     )
 
-
 def merge_day_spans(day_spans: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """把重叠或首尾相接的日区间并成互不相接的几段（按起点升序）。
 
@@ -410,7 +394,6 @@ def merge_day_spans(day_spans: list[tuple[str, str]]) -> list[tuple[str, str]]:
 
     return [(span_start, span_end) for span_start, span_end in merged]
 
-
 def _spans_are_contiguous(next_start: str, current_end: str) -> bool:
     """下一段是否接着当前段：重叠，或正好从当前段的次日开始。
 
@@ -425,7 +408,6 @@ def _spans_are_contiguous(next_start: str, current_end: str) -> bool:
         date.fromisoformat(next_start).toordinal()
         <= date.fromisoformat(current_end).toordinal() + DAY_SPAN_ADJACENCY_DAYS
     )
-
 
 def ingest_stock(connection: sqlite3.Connection, stock_code: str, frequency: str, start_date: str, end_date: str) -> list[str]:
     """拉取单只股票区间数据并入库，返回有分钟数据的交易日（'YYYY-MM-DD' 升序）。
@@ -455,7 +437,6 @@ def ingest_stock(connection: sqlite3.Connection, stock_code: str, frequency: str
     logger.info("%s 入库 %s 根 %s 分钟 bar / %s 个交易日统计（%s ~ %s）", stock_code, len(minute_frame), frequency, len(daily_frame), start_date, end_date)
     return sorted(minute_frame["date"].unique())
 
-
 def get_last_trading_day(connection: sqlite3.Connection, stock_code: str, frequency: str) -> str | None:
     """库中该合约最后有分钟数据的交易日；无数据返回 None。
 
@@ -474,7 +455,6 @@ def get_last_trading_day(connection: sqlite3.Connection, stock_code: str, freque
     if row is None or row[0] is None:
         return None
     return datetime.strptime(row[0][:8], "%Y%m%d").date().isoformat()
-
 
 def load_minute_bars(connection: sqlite3.Connection, stock_code: str, frequency: str, start_day: str, end_day: str) -> pd.DataFrame:
     """按交易日区间读回分钟 bar（列名对齐 BaoStock 原始帧，供 build_bar_frame 复用）。
@@ -496,7 +476,6 @@ def load_minute_bars(connection: sqlite3.Connection, stock_code: str, frequency:
         connection, params=(stock_code, frequency, start_day, end_day),
     )
 
-
 def load_trading_day_stats(connection: sqlite3.Connection, stock_code: str, start_day: str, end_day: str) -> pd.DataFrame:
     """按交易日区间读回日度统计（索引对齐 query_daily_bars 输出）。
 
@@ -516,9 +495,7 @@ def load_trading_day_stats(connection: sqlite3.Connection, stock_code: str, star
     )
     return stats_frame.set_index("date")
 
-
 # ---------- Bar 行构建（与旧版一致：原始量额 → 累计/增量语义映射） ----------
-
 
 def build_bar_frame(minute_frame: pd.DataFrame, daily_frame: pd.DataFrame, exchange_id: str, instrument_id: str, preces: str) -> pd.DataFrame:
     """将单只股票的分钟线映射为 Bar Parquet 行（Volume/LastTraded 语义见 detect_cumulative_mode）。
@@ -599,7 +576,6 @@ def build_bar_frame(minute_frame: pd.DataFrame, daily_frame: pd.DataFrame, excha
         previous_close = closes[-1]
     return pd.DataFrame(rows, columns=[field.name for field in BAR_PARQUET_SCHEMA]), mismatch_records
 
-
 def to_decimal_series(series: pd.Series) -> pd.Series:
     """将 float/Decimal/None 混合列统一为 Decimal（pyarrow 的 float→decimal128 cast 不支持，需显式转换）。
 
@@ -626,9 +602,7 @@ def to_decimal_series(series: pd.Series) -> pd.Series:
 
     return series.map(convert)
 
-
 # ---------- Parquet 写出 / 归档 ----------
-
 
 def bar_file_path(output_root: str, exchange_id: str, period: str, frequency: str) -> str:
     """三代文件共用命名：period 为 'YYYY'（年）/ 'YYYYMM'（月）/ 'YYYYMMDD'（日），频率作后缀。
@@ -644,7 +618,6 @@ def bar_file_path(output_root: str, exchange_id: str, period: str, frequency: st
     """
     return os.path.join(output_root, "Bar", f"Identity={exchange_id}.Stock", f"Year={period[:4]}", f"{period}_{frequency}m.parquet")
 
-
 def write_bar_file(parquet_file: str, bar_frame: pd.DataFrame) -> None:
     """排序 + Decimal 化后按既有 schema 写单文件（纯数据库再导出，不做文件侧合并）。
 
@@ -658,7 +631,6 @@ def write_bar_file(parquet_file: str, bar_frame: pd.DataFrame) -> None:
     os.makedirs(os.path.dirname(parquet_file), exist_ok=True)
     table = pa.Table.from_pandas(ordered_frame, schema=BAR_PARQUET_SCHEMA, preserve_index=False)
     pq.write_table(table, parquet_file, compression="zstd")
-
 
 def archive_file(file_path: str) -> None:
     """将上一代文件移入同目录 archive/（重命名而非删除；回测 glob 不扫描 archive 层）。
@@ -675,7 +647,6 @@ def archive_file(file_path: str) -> None:
     os.rename(file_path, target_path)
     logger.info("归档 %s → %s", file_path, target_path)
 
-
 def archive_matching_files(directory: str, patterns: list[str]) -> None:
     """将目录顶层匹配 glob 模式的文件归档（合并命令在写出新文件后调用）。
 
@@ -691,7 +662,6 @@ def archive_matching_files(directory: str, patterns: list[str]) -> None:
             continue
         if any(fnmatch.fnmatch(file_name, pattern) for pattern in patterns):
             archive_file(file_path)
-
 
 def write_mismatch_report(target_file: str, period: str, frequency: str, mismatch_records: list[dict[str, Any]]) -> None:
     """将分钟量与日线量偏差 >1% 的交易日明细写成同目录 CSV（正偏差 = 分钟多于日线），>5% 的天逐日告警。
@@ -711,7 +681,6 @@ def write_mismatch_report(target_file: str, period: str, frequency: str, mismatc
     report_frame = pd.DataFrame(mismatch_records).sort_values(["InstrumentID", "TradingDay"])
     report_frame.to_csv(report_file, index=False, encoding="utf-8-sig")
     logger.warning("%s 共 %s 天分钟量与日量偏差超 1%%，明细见 %s", os.path.basename(target_file), len(mismatch_records), report_file)
-
 
 def warn_coverage_shrink(connection: sqlite3.Connection, frequency: str, start_day: str, end_day: str, target_file: str) -> None:
     """重写既有文件前检查覆盖收缩（仅告警不阻断）：
@@ -746,9 +715,7 @@ def warn_coverage_shrink(connection: sqlite3.Connection, frequency: str, start_d
     if existing_min < database_min or existing_max > database_max:
         logger.warning("%s 既有覆盖 %s~%s 超出库中数据 %s~%s，重写将丢失库外天数", target_file, existing_min, existing_max, database_min, database_max)
 
-
 # ---------- 导出（数据库 → Parquet，唯一出口） ----------
-
 
 def export_bars_from_database(connection: sqlite3.Connection, output_root: str, frequency: str, exchange_id: str,
                               stock_codes: list[str], start_day: str, end_day: str, period: str,
@@ -788,9 +755,7 @@ def export_bars_from_database(connection: sqlite3.Connection, output_root: str, 
     write_mismatch_report(target_file, period, frequency, mismatch_records)
     archive_matching_files(os.path.dirname(target_file), archive_patterns)
 
-
 # ---------- 子命令 ----------
-
 
 def run_update(connection: sqlite3.Connection, stock_codes: list[str], frequency: str, output_root: str,
                start_date: str | None, end_date: str, default_start_date: str) -> None:
@@ -824,7 +789,6 @@ def run_update(connection: sqlite3.Connection, stock_codes: list[str], frequency
                 trading_day, trading_day, trading_day.replace("-", ""), archive_patterns=[],
             )
 
-
 def get_last_month() -> str:
     """上一个自然月。
 
@@ -833,7 +797,6 @@ def get_last_month() -> str:
     """
     last_month_last_day = datetime.today().replace(day=1) - timedelta(days=1)
     return last_month_last_day.strftime("%Y%m")
-
 
 def run_merge_month(connection: sqlite3.Connection, stock_codes: list[str], frequency: str, output_root: str, month: str) -> None:
     """整月导出为月度文件，归档该月全部日度文件。
@@ -857,7 +820,6 @@ def run_merge_month(connection: sqlite3.Connection, stock_codes: list[str], freq
             period_start, period_end, month, archive_patterns,
         )
 
-
 def run_merge_year(connection: sqlite3.Connection, stock_codes: list[str], frequency: str, output_root: str, year: str) -> None:
     """整年导出为年度文件，归档该年全部月度文件与残留日度文件。
 
@@ -876,7 +838,6 @@ def run_merge_year(connection: sqlite3.Connection, stock_codes: list[str], frequ
             connection, output_root, frequency, exchange_id, exchange_codes,
             f"{year}-01-01", f"{year}-12-31", year, archive_patterns,
         )
-
 
 def run_backfill(connection: sqlite3.Connection, stock_codes: list[str], frequency: str, output_root: str, start_date: str, end_date: str) -> None:
     """区间入库并直接写出年度 Parquet（历史回补不产生日度文件）；仅触及回补区间相交的年份。
@@ -904,9 +865,7 @@ def run_backfill(connection: sqlite3.Connection, stock_codes: list[str], frequen
                 f"{year}-01-01", f"{year}-12-31", year, archive_patterns=[],
             )
 
-
 # ---------- 命令行入口 ----------
-
 
 def parse_arguments() -> argparse.Namespace:
     """解析命令行参数。
@@ -951,7 +910,6 @@ def parse_arguments() -> argparse.Namespace:
 
     return parser.parse_args()
 
-
 def main() -> None:
     """命令行入口：按子命令分派，并保证 Baostock 注销与数据库连接关闭。"""
     arguments = parse_arguments()
@@ -985,7 +943,6 @@ def main() -> None:
         finally:
             if logged_in:
                 bs.logout()
-
 
 if __name__ == "__main__":
     main()
