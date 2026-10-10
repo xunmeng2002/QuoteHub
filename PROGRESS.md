@@ -30,6 +30,30 @@
 
 - 2026-10-10：**网络层加接收超时，修掉 `--update-all` 永久挂死与 Ctrl+C 无效**（用户裁定「加吧」）。**现象**：`python bao_stock.py --update-all` 停在「1/7 证券同步」后的「证券同步基准日期: 2026-10-09」，30+ 分钟再无输出。**取证**：`Get-Process python` 显示 CPU 仅 0.5 秒、工作集 2.8 MB，且 3 秒内两次采样完全一致——空转在 I/O 上，不是死循环也不是在算。**根因（第三方库）**：`baostock/util/socketutil.py` 的 `send_msg` 建 socket 时**不设超时**，收包循环 `while True: recv(8192)` 又只在攒到结尾分隔符时才退出；上游 `public-api.baostock.com`（解析到 114.94.20.42:10030）的大响应当时严重降速——裸字节探针实测 `query_all_stock` 整包约 130 KB，30 秒只吐 40 KB（约 1.3 KB/s）后停住。小响应则完全正常：`login` 0.2 s、`query_trade_dates` 0.1 s、`query_history_k_data_plus` 0.5 s。**Ctrl+C 也退不出的原因**：中断确实抛出了，但落在 `finally: bs.logout()` 里，而 `logout()` 内部同样走 `sock.send_msg`、在**同一个** socket 上再收一次包——于是又掉回无超时的收包循环，表现为「按了没反应」。**改动六处**：① 新增常量 `SOCKET_TIMEOUT_SECONDS = 60`；② 新增 `enable_socket_timeout()`——`socket.setdefaulttimeout(...)`，**必须早于首次登录**（baostock 的 socket 在 `login` 时创建，晚了不生效）；③ 新增 `logout_quietly()`——把 `bs.logout()` 包进 `try/except Exception` 只记 warning，保证清理阶段不盖掉真正的失败原因，且 `KeyboardInterrupt` 不属 `Exception`，故第二次 Ctrl+C 能立即中断注销；④ 三处 `bs.logout()`（`_run_update` / `update_all` / `--sync-securities` 分支）与管线 `main()` 那处一并改 `logout_quietly()`；⑤ 两脚本入口各调一次 `enable_socket_timeout()`；⑥ 顺带补 `bao_stock.py` **末尾缺失的换行**（`.editorconfig` 的 `insert_final_newline`）——属既有问题，`git show HEAD:bao_stock.py` 末尾即为右括号无换行，非本次引入。**阈值为何取 60 秒**：这是**每次 `recv`** 的超时、不是整包总时长，只有服务端**连续停顿**超过阈值才判失败；实测正常分块间隔约 6 秒，60 秒约为其 10 倍，故不取小。**验证**：① `probe4` 确认调用后 baostock 在 login 时建的 socket `gettimeout()` 读回 `60.0`（默认原本是 `None`）；② `probe5` 端到端确认对当前降速接口的调用在 **124.8 秒**后返回 `err=10002007 网络接收错误。`（两个超时周期）而非永久挂死，`sync_securities` 会据此记「获取证券列表失败」并返回；③ `python -m pytest -q` → **40 passed**（新增两用例：默认超时被置为常量、`logout_quietly` 吞掉 `OSError`），`py_compile` 通过，三个改动文件 CRLF=0、行长 ≤150。**遗留风险**：阈值只把「挂死」变成「有界失败」，不解决「上游很慢」，最坏一次失败约 2 分钟；Ctrl+C 若正好落在 `logout_quietly()` 内，仍需再按一次才立即退出。**旁记**：管线 `bao_stock_parquet.py backfill` 只走 `query_history_k_data_plus` 与本地库，不碰这三个降速接口，是当时唯一能出数据的路。
 
+- 2026-10-10：**`--update-all` 的假成功与行业分类主键崩溃一并修复**（用户裁定「严格收集 + 失效即中止」）。**两个独立缺陷**：
+  ① 16:43 那次全量更新 2/7 之后每步都打印「用户未登录」，却仍以 `===== 全量更新完成 =====` 收场、退出码 0——根因是 `_collect_rows` 的 while 条件是
+  `error_code == "0"`，分页中途失败只跳出循环、把已取到的行交出去（实测行业分类只拿到 2000 行当 5558 行的全量），调用方「查询失败就 return」的前置判断永远看不到这个错误。
+  ② 17:11 复跑抛 `UNIQUE constraint failed: IndustryClassification.Code, IndustryClassification.UpdateDate`——根因是接口字段 `updateDate` 与建表列 `UpdateDate`
+  在 SQLite 里是**同一列**（列名比较不区分大小写），且接口那个排在前、值覆盖我方的值（存进去的是 `2026-10-05`，DELETE 键却是当天），于是 DELETE 永不命中、重跑必撞主键；
+  `update_index_constituents` 同型（探针实测其字段同构）。
+  **改动**：① 删掉宽松的 `_collect_rows`，改为严格 `collect_rows_or_raise(result_set, context_label)` 与异常层级
+  `BaostockUpdateAbortedError(RuntimeError)` / `BaostockSessionLostError`（10001001 会话失效）/
+  `BaostockPaginationInterruptedError`，`None` 结果集同样中止；16 处调用点全部切换，连带删掉失效的「`error_code != 0` 就 return/continue」与两处「`result is None`」判断；
+  `bao_stock_parquet.py` 删掉自己那份同名函数、改为从 `bao_stock` 导入（其文档契约声明抛 RuntimeError，新基类即是）。② 新增 `_restrict_to_table_columns` 按建表列白名单裁帧，`update_industry` 与
+  `update_index_constituents` 各用一次（白名单与 `Update_v2.0.0.sql` 列定义一致）。③ 中止语义与提交粒度：`_run_update` / `--sync-securities` / `update_all()` 捕获中止异常 →
+  `_exit_on_update_aborted` 记两行日志并 `SystemExit(1)`；`update_all_extended` 改为每批、每只股票提交；`update_all()` 补上原先**完全缺失**的 `connection.commit()`——
+  `sqlite3` 关闭不提交即整轮回滚，`--update` 此前「下载完一行不落库」（实测复现：insert 后 close，重开 0 行）。
+  **验证**：`python -m pytest -q` → **51 passed**（新增 11 例：分页替身、两个异常分支、`None` 结果集、RuntimeError 契约、白名单裁列、退出码 1、
+  行业分类与指数成分各跑两遍的落库回归例、`_get_previous_trading_date` 中止例、`--update` 落库回归例）。
+  **真接口各跑两遍**（临时库，未碰 `stock_data.db`）：
+  行业分类两遍均成功、共 **5558** 行、`UpdateDate` 全为 `2026-10-10`、重复 Code 0；指数成分股两遍均成功、`hs300 300 + sz50 50 + zz500 500`、`UpdateDate` 全为查询基准日 `2026-10-09`。
+  **离线时序实测**（探针以桩代三步）：第 3 步抛会话失效 → 日志两行、退出码 1、**第 1/2 步落库保留**、第 3 步未提交部分 0 行。
+  **行为变化（须知）**：单只代码级查询失败此前「记 warning 后跳过」，现在一律中止整轮——探针实测「无数据」回落为 `err=0` + 0 行（非股票代码亦然），不会误杀。
+  **code-reviewer 两轮复审**（同日）：一轮改 4 处——`_fetch_and_store_financial` docstring 仍写「失败返回 0」、`bao_stock_parquet.py` 的两处
+  `error_code != "0"` 前置判断抢在异常分类之前抛错（会话失效退化成 `AttributeError`）、`update_all_extended` 的 Note 高估提交粒度、`SystemExit(1)` 缺异常链；
+  二轮改文档口径 1 处（把「第 4 步日 K」误写成「第 4、7 步」），并把测试改走 `closing` 与落库 fixture，去掉手写 `close()`。两轮均判无高风险项。
+  **未做**：`--update-all` 全量重跑（数十分钟起）；用户库中仍有 2000 行 `2026-10-05` 的陈旧行业分类，重跑前须先清（见备注）。
+
 ## 🔄 进行中
 
 - 无。
@@ -39,7 +63,7 @@
 - `sql/schema/` 只有 `Create_v1.0.0.sql` 与 `Create_v2.0.0.sql`，缺 `Create_v2.1.0` / `2.2.0` / `2.3.0.sql`；`rules/database-style.md` §6 要求每次发版**同时**更新 schema 与 upgrades（等价性：空库执行 `Create_v2.0.0` ＋ 依次 upgrades 即得最新）。本仓 `init_database` 走的是「`Create_v1.0.0` ＋ 依次 upgrades」，运行上不受影响，但按规范属缺档。是否补齐待定（补齐后 `init_database` 是否改走最新 Create 也需一并决定）。
 
 - `login_with_retry`（`bao_stock.py:101`）重试失败时的 warning 与致命错误**共用 `登录失败` 子串**，消费方若只认子串会把「首次失败、二次成功」的 0 退出误判为失败。契约已写明「必须先看退出码」，但**根治**是改文案（如「登录尝试失败」）让该子串唯一——属**消费方可见的诊断措辞变更**（平台的 `LOGIN_FAILURE_STDERR_MARKER` 正匹配该串），是否改由用户定。
-- `python bao_stock.py --update-all` 尚未实际执行（全量拉取耗时较长，且会写库）。**注**：本次环境重建后**未做 baostock 登录端到端**，"装好了"目前只验到"脚本能加载"，没验到"能取数"。
+- `python bao_stock.py --update-all` 仍没跑过整轮（全量拉取数十分钟起、且会写库）。**注**：2026-10-10 已用真接口逐项验过登录与取数（行业分类 5558 行、指数成分股 850 行），`--update` 落库也已由测试桩验过；但「七步连着跑一遍」与「`--update` 真接口跑一遍」尚未实测。
 
 - 是否需要把 Python 运行时也锁定为其他 LTS 版本（原基线 3.14.5，本机现为 3.14.7，且 3.14.7 已被本次重建沿用）。
 
@@ -48,9 +72,9 @@
 ## 备注
 
 - 诊断遗留的临时下载目录（可自行清理）：`%TEMP%\pdtest`、`%TEMP%\pdtest2`、`%TEMP%\bscheck`、`%TEMP%\patest`、`%TEMP%\bs_probe`（本轮网络诊断的五个探针脚本，可自行清理）。
-- ✅ 已完成区本轮后**已达 10 批**，按 §8.1「超过 5 批即滚动」应把最旧一条（首个 pip/依赖安装条，已被后续"环境重建"条取代）移入 `PROGRESS-archive.md` 并在 `PROGRESS-index.md` 补索引行。**未擅自执行**：归档条目 ID 按规则「取自拆分当日的文档顺序」且「此后永久稳定」，编号起点在本仓无先例（归档层尚未建立），需用户确认后再动。当前 `PROGRESS.md` 约 32 KB，远低于 50 KB 目标，不急。
+- 用户库 `stock_data.db` 里 `IndustryClassification` 存有 **2000 行 `UpdateDate='2026-10-05'`** 的陈旧数据（就是被接口 `updateDate` 顶掉的那批），其余 22 张表 0 行、`Securities` 7424 行；修复后的代码只清理「当天」那一份，**不会**动这 2000 行，故下次全量跑之前须先清（`DELETE FROM IndustryClassification`，或直接删库重跑）。
+- 归档层（`PROGRESS-archive.md` / `PROGRESS-index.md`）**仍未建立**，而 ✅ 区已达 **10 批**，按 §8.1「超过 5 批即滚动」应把最旧一条（首个 pip/依赖安装条，已被后续「环境重建」条取代）移入归档并在索引补行；`PROGRESS.md` 现约 **50 KiB**（1024 口径，与上文既有条目一致），已顶到上限、只剩几十字节余量，下一条新记录非搬不可。**未擅自执行**：归档条目 ID 按规则「取自拆分当日的文档顺序」且「此后永久稳定」，编号起点在本仓无先例（归档层尚未建立），需用户确认后再动。
 - **行宽口径 150**（2026-10-10 裁定）。`python-style.md` §3 把缩进/行宽/换行符一律划归项目根 `.editorconfig` 管，故 `rules` 文件里一度不重复声明行宽数值（**2026-10-10 修订**：用户随后要求把 cpp 的「函数签名换行」条搬进其余语言规范，故 `../AI` 侧现已各自写入 150 阈值／120 填充，见下方分叉条）。本仓那份原先**缺 `max_line_length`**，是隔壁六仓（QuantTrading / Mdb / Beacon / DbAdapters / Templates / Spark）里唯一掉队的——它们都声明 `max_line_length = 150` 并在头注释写明来处。已按兄弟仓模板补齐：`[*]` 补 `max_line_length = 150`、补头注释（「机械格式的唯一权威」＋ 150 的来处）与分节注释，并顺手补 `[*.sql] indent_size = 4`（本仓有 6 个 .sql 受控文件，此前无任何段覆盖，只能落编辑器默认值）。**口径来处**：`markdown-style.md` §12「纯文本 ≤ 150 字符」＋ `cpp-style.md` §3 的函数签名单行阈值 150（**该文件里的 120 是"超过阈值后换行、每行填充到接近 120"，是填充目标不是上限**，此前误当上限用）。**落地后现状**：代码文件 0 行超标（原 `bao_stock_parquet.py` 有 1 行 151 字符，已拆行），markdown 36 行超标未处理（见 ❓）。**2026-10-10 续**：`markdown-style.md` §5 代码块行宽 80→150 已统一（用户裁定「所有文字类型的行宽限制统一」，commit `96b765f`）；该文件 §7「单元格内容 ≤ 40 字符」是**单元格文本长度**、非行宽，未动。同轮把 `python-style.md` §3 签名换行口径与 cpp 对齐（120 填充／严禁垂直铺开，并把「函数参数列表」移出尾随逗号条以防自相矛盾，commit `465fc34`）；`wpf-style.md` 新增 §4「XAML 标记格式」（元素标签换行阈值 150，commit `0f25c4a`）——用户先判「wpf 暂不管」、随即改判「XAML 也要限 150」，故补上；`.xaml` 归该文件、`.xaml.cs` 的 C# 归 `csharp-style.md`。
 - **规则仓（`../AI`）与部署副本（`.claude`）已分叉**（2026-10-10 发现，用户指定 `../AI` 为版本控制权威）。仓内新、部署旧的有 6 份（`CLAUDE.md`／`python-style.md`／`csharp`／`web`／`database`／`markdown`，其中 python 是 193→217 行大改）；**反向**两份是部署新、仓内旧——`wpf-style.md`（部署多「TextBox vs TextBlock 只读回显」三条细化）与 `CLAUDE.md`（部署版含 §8.1 三层分层 `PROGRESS-index.md`＋§1 删除红线细化，仓内版含「禁止创建分支」）——**这两份整份覆盖会丢内容，须双向合并**。部署 `database-style.md` 还是 CRLF（仓内 LF）。2026-10-10 按用户指示**只改仓内、部署由用户执行**：为 python／csharp／web／database 四份补入行宽设置（commit `de5a1d7`）。**同日后按用户指示把 `.claude` 独有内容并回仓内**（`CLAUDE.md` 的 §8.1 三层分层＋§1 删除红线细化、`wpf-style.md` 的只读回显三行＋§2 注记），保留仓内独有的「禁止创建分支」——**分叉已消除**，仓内自此为超集，整份部署安全（仅 `database-style.md` 的 CRLF 需留意；合并 commit `fe3a5c3`）。
 - `__pycache__/` 内仍留着改名前的 `BaoStock*.cpython-*.pyc`（旧模块名的孤儿产物；该目录已被 `.gitignore` 忽略，Python 不会再加载它们，无害）。如需清理，**逐个 `rm` 文件**而非递归删目录。
 - **消费方（`../QuantPlatform`）待同步的硬编码点**（2026-10-10 查明，用户已说明由其自行改造为配置文件，本仓未动）：① `backend/app/config.py:63` `QUOTE_HUB_CLI_FILENAME = "BaoStockParquet.py"` —— **陈旧入口名，是当前集成真正断掉的一处**，应改 `bao_stock_parquet.py`；② `backend/tests/quote_hub_stub.py:119` 摆的同名桩件把平台测试维持在全绿，**掩盖了①**——改真名时须同步改桩，否则改完仍测不出；③ `docs/acceptance-checklist.md:258` 与 `:298`（后者含 `from BaoStock import DB_PATH`）为文档引用；④ `backend/app/config.py:62` 的 `DEFAULT_QUOTE_HUB_ROOT = PLATFORM_ROOT.parent / "QuoteHub"` 与 `QUOTE_HUB_DATABASE_FILENAME = "stock_data.db"` 本身与本仓齐全，无需改。**另须注意**：平台按**只读**方式开库（`?mode=ro`）、以 `cwd=本仓根` 调起命令行、且只认 stderr 里的 `登录失败` 一个子串——这三条已写入 `docs/baostock-component-contract.md`。
-- 归档层（`PROGRESS-archive.md` / `PROGRESS-index.md`）**仍未建立**：✅ 区本轮后已 **10 批**，远超 §8.1 的 5 批阈值。条目 ID 的编号起点在本仓无先例，按规则「取自拆分当日的文档顺序」需用户先裁定，故未擅动；当前 `PROGRESS.md` 约 42.4 KB，仍在 50 KB 目标内。

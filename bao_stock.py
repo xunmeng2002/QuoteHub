@@ -37,7 +37,7 @@ import sqlite3
 import sys
 import threading
 from datetime import datetime, timedelta
-from typing import Any, Callable
+from typing import Any, Callable, Never
 
 import baostock as bs
 import pandas as pd
@@ -52,6 +52,9 @@ MAX_LOGIN_RETRIES = 5
 RETRY_DELAY_SECONDS = 5
 SOCKET_TIMEOUT_SECONDS = 60
 
+# 服务端在会话失效后对任何查询都返回此码（客户端源码里没有「用户未登录」这句文案，只能是服务端发的）
+BAOSTOCK_SESSION_LOST_ERROR_CODE = "10001001"
+
 # ---------- 版本 ----------
 
 VERSION_FILE = "version.txt"
@@ -63,25 +66,76 @@ logger = logging.getLogger(__name__)
 # 配置与 JSON 记录的形状（为什么用 Any 见模块 docstring「关于 Any」）
 type JsonObject = dict[str, Any]
 
+# ---------- 异常 ----------
+
+class BaostockUpdateAbortedError(RuntimeError):
+    """结果集没能完整拉取，本次更新必须中止。
+
+    继承 RuntimeError：`bao_stock_parquet` 的模块契约声明其分页函数抛 RuntimeError。
+    """
+
+class BaostockSessionLostError(BaostockUpdateAbortedError):
+    """服务端已丢弃本次会话；此后任何查询都会失败，继续跑只会记下一串假成功。"""
+
+class BaostockPaginationInterruptedError(BaostockUpdateAbortedError):
+    """分页中途出错，已取到的行只是结果集的一部分。"""
+
 # ---------- 工具函数 ----------
 
-def _collect_rows(result_set: Any) -> list[list[str]]:
-    """将 Baostock 结果集全部拉取为行列表。
+def collect_rows_or_raise(result_set: Any, context_label: str) -> list[list[str]]:
+    """将 Baostock 结果集全部拉取为行列表；拉不全就抛异常。
+
+    结果集接口把「这一页失败了」写进 `error_code` 而不抛异常，`next()` 只返回 False，
+    于是分页中断只表现为「行数比实际少」。2026-10-10 线上即由此拿下 2000 行当 5558 行的
+    全量行业分类，还记了一条成功日志。本函数把这种情况变成异常：宁可整轮中止，不留半份数据。
 
     Args:
         result_set: Baostock 查询返回的结果集对象。
+        context_label: 出错信息里的业务上下文（证券代码、步骤名等）。
 
     Returns:
-        行列表，每行为字段字符串列表。
+        行列表，每行为字段字符串列表；结果集完整时才有返回。
 
-    Note:
-        分页中途失败时只是跳出循环、返回已取到的行，不抛异常；需要「要么全有、
-        要么报错」时改用 `bao_stock_parquet.collect_rows_or_raise`。
+    Raises:
+        BaostockUpdateAbortedError: 查询没返回结果集。
+        BaostockSessionLostError: 服务端返回 10001001，会话已失效。
+        BaostockPaginationInterruptedError: 其他错误码，行数与实际不符。
     """
+    if result_set is None:
+        raise BaostockUpdateAbortedError(f"{context_label}: 查询未返回结果集")
+
     rows: list[list[str]] = []
     while (result_set.error_code == "0") and result_set.next():
         rows.append(result_set.get_row_data())
+
+    error_code = result_set.error_code
+    if error_code == BAOSTOCK_SESSION_LOST_ERROR_CODE:
+        raise BaostockSessionLostError(
+            f"{context_label}: 会话已失效（{error_code} {result_set.error_msg}），已取 {len(rows)} 行；"
+            "服务端此后对任何查询都会返回同一错误，重新登录后再跑"
+        )
+    if error_code != "0":
+        raise BaostockPaginationInterruptedError(
+            f"{context_label}: 结果集读取中断（{error_code} {result_set.error_msg}），"
+            f"已取 {len(rows)} 行并不完整"
+        )
     return rows
+
+def _restrict_to_table_columns(frame: pd.DataFrame, table_columns: list[str]) -> pd.DataFrame:
+    """只保留建表列，丢掉接口多给的字段。
+
+    SQLite 的列名比较不区分大小写：接口返回的 `updateDate` 与建表列 `UpdateDate` 会被当成
+    同一列，且接口那个排在前、值覆盖我方的值——于是 `DELETE ... WHERE UpdateDate=基准日`
+    永远不命中，重跑必撞主键。2026-10-10 的行业分类、指数成分股都栽在这里。
+
+    Args:
+        frame: 接口字段构成的 DataFrame。
+        table_columns: 目标表的列名白名单。
+
+    Returns:
+        仅含白名单中实际存在列的新 DataFrame。
+    """
+    return frame[[column for column in table_columns if column in frame.columns]]
 
 # ---------- Baostock 登录 ----------
 
@@ -193,7 +247,10 @@ def _get_previous_trading_date(connection: sqlite3.Connection | None = None, loo
         lookback_days: 向前搜索天数，默认 10 天。
 
     Returns:
-        交易日字符串 "YYYY-MM-DD"，或 None（无法确定时）。
+        交易日字符串 "YYYY-MM-DD"，或 None（区间内无交易日、无法确定时）。
+
+    Raises:
+        BaostockUpdateAbortedError: 本地无缓存且接口结果集拉取不完整。
     """
     today = datetime.today()
     yesterday = today - timedelta(days=1)
@@ -218,14 +275,8 @@ def _get_previous_trading_date(connection: sqlite3.Connection | None = None, loo
     start = (today - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     end = yesterday.strftime("%Y-%m-%d")
     result = bs.query_trade_dates(start_date=start, end_date=end)
-    if result is None:
-        logger.warning("交易日历查询返回空，将使用当天作为回退")
-        return None
-    if result.error_code != "0":
-        logger.warning("交易日历查询失败（推算交易日时将使用当天）: %s", result.error_msg)
-        return None
 
-    rows = _collect_rows(result)
+    rows = collect_rows_or_raise(result, "交易日历查询")
     for row in reversed(rows):
         if len(row) >= 2 and row[1] == "1":  # is_trading_day == "1"
             return row[0]  # calendar_date
@@ -268,21 +319,22 @@ def fetch_and_store_stock(connection: sqlite3.Connection, stock_code: str, start
         start_date: 下载起始日期 'YYYY-MM-DD'（含）。
 
     Returns:
-        写入 DailyRawPrices 的价格行数；无新数据或价格查询失败返回 0。
+        写入 DailyRawPrices 的价格行数；无新数据返回 0。
+
+    Raises:
+        BaostockUpdateAbortedError: 价格或复权因子结果集拉取不完整。
     """
     # 原始价格：不复权（Baostock adjustflag="3"）
-    price_result = bs.query_history_k_data_plus(
-        stock_code,
-        "date,code,open,high,low,close,volume,amount",
-        start_date=start_date,
-        frequency="d",
-        adjustflag="3",
+    price_rows = collect_rows_or_raise(
+        bs.query_history_k_data_plus(
+            stock_code,
+            "date,code,open,high,low,close,volume,amount",
+            start_date=start_date,
+            frequency="d",
+            adjustflag="3",
+        ),
+        f"{stock_code} 原始价格",
     )
-    if price_result.error_code != "0":
-        logger.error("%s 价格查询失败: %s", stock_code, price_result.error_msg)
-        return 0
-
-    price_rows = _collect_rows(price_result)
     if not price_rows:
         logger.info("%s 从 %s 至今无新价格数据", stock_code, start_date)
         return 0
@@ -296,38 +348,35 @@ def fetch_and_store_stock(connection: sqlite3.Connection, stock_code: str, start
 
     # 复权因子：全部字段写入
     factor_result = bs.query_adjust_factor(stock_code, start_date=start_date)
-    if factor_result.error_code == "0":
-        factor_rows = _collect_rows(factor_result)
-        if factor_rows:
-            raw_fields: list[str] = factor_result.fields
-            logger.info("因子原始字段: %s", raw_fields)
-            factor_frame = pd.DataFrame(factor_rows, columns=raw_fields)
+    factor_rows = collect_rows_or_raise(factor_result, f"{stock_code} 复权因子")
+    if factor_rows:
+        raw_fields: list[str] = factor_result.fields
+        logger.info("因子原始字段: %s", raw_fields)
+        factor_frame = pd.DataFrame(factor_rows, columns=raw_fields)
 
-            field_mapping: dict[str, str] = {
-                "code": "Code",
-                "dividOperateDate": "EventDate",
-                "foreAdjustFactor": "ForeFactor",
-                "backAdjustFactor": "BackFactor",
-                "adjustFactor": "CumFactor",
-            }
-            factor_frame = factor_frame.rename(columns=field_mapping)
-            # 只保留目标列，防御 Baostock 新增意外字段
-            target_columns = ["Code", "EventDate", "ForeFactor", "BackFactor", "CumFactor"]
-            factor_frame = factor_frame[
-                [col for col in target_columns if col in factor_frame.columns]
-            ]
-            for column in ["ForeFactor", "BackFactor", "CumFactor"]:
-                if column in factor_frame.columns:
-                    factor_frame[column] = pd.to_numeric(
-                        factor_frame[column], errors="coerce"
-                    )
+        field_mapping: dict[str, str] = {
+            "code": "Code",
+            "dividOperateDate": "EventDate",
+            "foreAdjustFactor": "ForeFactor",
+            "backAdjustFactor": "BackFactor",
+            "adjustFactor": "CumFactor",
+        }
+        factor_frame = factor_frame.rename(columns=field_mapping)
+        # 只保留目标列，防御 Baostock 新增意外字段
+        target_columns = ["Code", "EventDate", "ForeFactor", "BackFactor", "CumFactor"]
+        factor_frame = factor_frame[
+            [col for col in target_columns if col in factor_frame.columns]
+        ]
+        for column in ["ForeFactor", "BackFactor", "CumFactor"]:
+            if column in factor_frame.columns:
+                factor_frame[column] = pd.to_numeric(
+                    factor_frame[column], errors="coerce"
+                )
 
-            factor_frame.to_sql(
-                "AdjustFactors", connection, if_exists="append", index=False
-            )
-            logger.info("%s 复权因子新增 %s 条", stock_code, len(factor_frame))
-    else:
-        logger.warning("%s 复权因子查询失败: %s", stock_code, factor_result.error_msg)
+        factor_frame.to_sql(
+            "AdjustFactors", connection, if_exists="append", index=False
+        )
+        logger.info("%s 复权因子新增 %s 条", stock_code, len(factor_frame))
 
     price_frame.to_sql(
         "DailyRawPrices", connection, if_exists="append", index=False
@@ -352,13 +401,10 @@ def sync_securities(connection: sqlite3.Connection) -> None:
     )
     logger.info("证券同步基准日期: %s", query_date)
 
-    result = bs.query_all_stock(day=query_date)
-    if result.error_code != "0":
-        logger.error("获取证券列表失败: %s", result.error_msg)
-        return
-
+    all_stocks_result = bs.query_all_stock(day=query_date)
     all_stocks = pd.DataFrame(
-        _collect_rows(result), columns=result.fields
+        collect_rows_or_raise(all_stocks_result, f"{query_date} 全市场证券列表"),
+        columns=all_stocks_result.fields,
     )
     if all_stocks.empty:
         logger.warning("%s 证券列表为空（Baostock 服务端可能异常），跳过本次证券同步", query_date)
@@ -380,22 +426,19 @@ def sync_securities(connection: sqlite3.Connection) -> None:
         # 批量获取基本信息，避免逐个查询
         basic_map: dict[str, dict[str, str]] = {}
         basic_result = bs.query_stock_basic(code="")
-        if basic_result.error_code == "0":
-            basic_df = pd.DataFrame(
-                _collect_rows(basic_result), columns=basic_result.fields
-            )
-            basic_df.columns = basic_df.columns.str.strip()
-            basic_map = {
-                row["code"]: {
-                    "ipoDate": row["ipoDate"],
-                    "outDate": row["outDate"],
-                    "type": row["type"],
-                }
-                for _, row in basic_df.iterrows()
-                if row["code"] in new_codes
+        basic_df = pd.DataFrame(
+            collect_rows_or_raise(basic_result, "全市场证券基本信息"), columns=basic_result.fields
+        )
+        basic_df.columns = basic_df.columns.str.strip()
+        basic_map = {
+            row["code"]: {
+                "ipoDate": row["ipoDate"],
+                "outDate": row["outDate"],
+                "type": row["type"],
             }
-        else:
-            logger.warning("新股基本信息批量查询失败: %s", basic_result.error_msg)
+            for _, row in basic_df.iterrows()
+            if row["code"] in new_codes
+        }
 
         for code in new_codes:
             stock_row = all_stocks[all_stocks["code"] == code].iloc[0]
@@ -497,7 +540,10 @@ def _fetch_and_store_financial(connection: sqlite3.Connection, code: str, year: 
         numeric_fields: 需转为数值类型的列名列表。
 
     Returns:
-        写入行数；接口无返回值、报错或无数据时返回 0。
+        写入行数；接口成功但无数据时返回 0。
+
+    Raises:
+        BaostockUpdateAbortedError: 结果集拉取不完整（未返回结果集、分页中断或会话失效）。
     """
     connection.execute(
         f"DELETE FROM {table_name} WHERE Code = ? AND Year = ? AND Quarter = ?",
@@ -505,14 +551,7 @@ def _fetch_and_store_financial(connection: sqlite3.Connection, code: str, year: 
     )
 
     result = query_func(code, str(year), str(quarter))
-    if result is None:
-        logger.info("%s %s %sQ%s 无返回值", code, table_name, year, quarter)
-        return 0
-    if result.error_code != "0":
-        logger.error("%s %s 查询失败 (%sQ%s): %s", code, table_name, year, quarter, result.error_msg)
-        return 0
-
-    rows = _collect_rows(result)
+    rows = collect_rows_or_raise(result, f"{code} {table_name} {year}Q{quarter}")
     if not rows:
         logger.info("%s %s %sQ%s 无数据", code, table_name, year, quarter)
         return 0
@@ -689,10 +728,7 @@ def update_dividend_data(connection: sqlite3.Connection, stock_codes: list[str],
                     (code, year, year_type),
                 )
                 result = bs.query_dividend_data(code, str(year), year_type)
-                if result.error_code != "0":
-                    logger.warning("%s 除权除息查询失败 (%s/%s): %s", code, year, year_type, result.error_msg)
-                    continue
-                rows = _collect_rows(result)
+                rows = collect_rows_or_raise(result, f"{code} 除权除息 {year}/{year_type}")
                 if not rows:
                     continue
                 frame = pd.DataFrame(rows, columns=result.fields)
@@ -754,13 +790,7 @@ def update_performance_express(connection: sqlite3.Connection, stock_codes: list
         result = bs.query_performance_express_report(
             code, start_date=start_date, end_date=end_date
         )
-        if result is None:
-            logger.warning("%s 业绩快报查询无返回值（%s ~ %s）", code, start_date, end_date)
-            continue
-        if result.error_code != "0":
-            logger.warning("%s 业绩快报查询失败: %s", code, result.error_msg)
-            continue
-        rows = _collect_rows(result)
+        rows = collect_rows_or_raise(result, f"{code} 业绩快报 {start_date}~{end_date}")
         if not rows:
             continue
         frame = pd.DataFrame(rows, columns=result.fields)
@@ -818,13 +848,7 @@ def update_forecast_reports(connection: sqlite3.Connection, stock_codes: list[st
         result = bs.query_forecast_report(
             code, start_date=start_date, end_date=end_date
         )
-        if result is None:
-            logger.warning("%s 业绩预告查询无返回值（%s ~ %s）", code, start_date, end_date)
-            continue
-        if result.error_code != "0":
-            logger.warning("%s 业绩预告查询失败: %s", code, result.error_msg)
-            continue
-        rows = _collect_rows(result)
+        rows = collect_rows_or_raise(result, f"{code} 业绩预告 {start_date}~{end_date}")
         if not rows:
             continue
         frame = pd.DataFrame(rows, columns=result.fields)
@@ -869,21 +893,18 @@ def update_index_constituents(connection: sqlite3.Connection) -> None:
             (index_code, query_date),
         )
         result = query_func(query_date)
-        if result is None:
-            logger.warning("%s 查询返回空", index_code)
-            continue
-        if result.error_code != "0":
-            logger.warning("%s 查询失败: %s", index_code, result.error_msg)
-            continue
-        rows = _collect_rows(result)
+        rows = collect_rows_or_raise(result, f"{index_code} 成分股 {query_date}")
         if not rows:
             continue
         frame = pd.DataFrame(rows, columns=result.fields)
         frame["IndexCode"] = index_code
-        frame["UpdateDate"] = query_date
         frame = frame.rename(
             columns={"code": "Code", "code_name": "CodeName"}
         )
+        frame = _restrict_to_table_columns(
+            frame, ["IndexCode", "Code", "CodeName", "UpdateDate"]
+        )
+        frame["UpdateDate"] = query_date
         frame.to_sql("IndexConstituents", connection, if_exists="append", index=False)
         total += len(frame)
         logger.info("%s 成分股 %s 只", index_code, len(frame))
@@ -903,14 +924,7 @@ def update_industry(connection: sqlite3.Connection) -> None:
     today = datetime.today().strftime("%Y-%m-%d")
 
     result = bs.query_stock_industry()
-    if result is None:
-        logger.error("行业分类查询返回空")
-        return
-    if result.error_code != "0":
-        logger.error("行业分类查询失败: %s", result.error_msg)
-        return
-
-    rows = _collect_rows(result)
+    rows = collect_rows_or_raise(result, "行业分类")
     if not rows:
         logger.info("行业分类无数据")
         return
@@ -924,6 +938,9 @@ def update_industry(connection: sqlite3.Connection) -> None:
         "industryClassification": "IndustryClassification",
     }
     frame = frame.rename(columns=column_map)
+    frame = _restrict_to_table_columns(
+        frame, ["Code", "CodeName", "Industry", "IndustryClassification", "UpdateDate"]
+    )
 
     connection.execute(
         "DELETE FROM IndustryClassification WHERE UpdateDate=?", (today,)
@@ -967,11 +984,7 @@ def update_trade_dates(connection: sqlite3.Connection, start_date: str = "1990-1
     connection.execute("DELETE FROM TradeDates WHERE CalendarDate >= ?", (start_date,))
 
     result = bs.query_trade_dates(start_date=start_date, end_date=end_date)
-    if result.error_code != "0":
-        logger.error("交易日历查询失败: %s", result.error_msg)
-        return
-
-    rows = _collect_rows(result)
+    rows = collect_rows_or_raise(result, f"交易日历 {start_date}~{end_date}")
     if not rows:
         return
 
@@ -1000,13 +1013,7 @@ def update_deposit_rates(connection: sqlite3.Connection) -> None:
     """
     connection.execute("DELETE FROM DepositRates")
     result = bs.query_deposit_rate_data(start_date="2000-01-01")
-    if result is None:
-        logger.error("存款利率查询返回空")
-        return
-    if result.error_code != "0":
-        logger.error("存款利率查询失败: %s", result.error_msg)
-        return
-    rows = _collect_rows(result)
+    rows = collect_rows_or_raise(result, "存款利率")
     if not rows:
         return
     frame = pd.DataFrame(rows, columns=result.fields)
@@ -1045,13 +1052,7 @@ def update_loan_rates(connection: sqlite3.Connection) -> None:
     """
     connection.execute("DELETE FROM LoanRates")
     result = bs.query_loan_rate_data(start_date="2000-01-01")
-    if result is None:
-        logger.error("贷款利率查询返回空")
-        return
-    if result.error_code != "0":
-        logger.error("贷款利率查询失败: %s", result.error_msg)
-        return
-    rows = _collect_rows(result)
+    rows = collect_rows_or_raise(result, "贷款利率")
     if not rows:
         return
     frame = pd.DataFrame(rows, columns=result.fields)
@@ -1086,13 +1087,7 @@ def update_reserve_ratios(connection: sqlite3.Connection) -> None:
     """
     connection.execute("DELETE FROM ReserveRatios")
     result = bs.query_required_reserve_ratio_data(start_date="2000-01-01")
-    if result is None:
-        logger.error("准备金率查询返回空")
-        return
-    if result.error_code != "0":
-        logger.error("准备金率查询失败: %s", result.error_msg)
-        return
-    rows = _collect_rows(result)
+    rows = collect_rows_or_raise(result, "准备金率")
     if not rows:
         return
     frame = pd.DataFrame(rows, columns=result.fields)
@@ -1127,13 +1122,7 @@ def update_money_supply(connection: sqlite3.Connection) -> None:
     result = bs.query_money_supply_data_month(
         start_date="2000-01", end_date=end_month
     )
-    if result is None:
-        logger.error("货币供应量查询返回空")
-        return
-    if result.error_code != "0":
-        logger.error("货币供应量查询失败: %s", result.error_msg)
-        return
-    rows = _collect_rows(result)
+    rows = collect_rows_or_raise(result, "货币供应量")
     if not rows:
         return
     frame = pd.DataFrame(rows, columns=result.fields)
@@ -1169,11 +1158,29 @@ def update_money_supply(connection: sqlite3.Connection) -> None:
 # 全量更新调度
 # ------------------------------------------------------------------
 
+def _exit_on_update_aborted(abort_error: BaostockUpdateAbortedError) -> Never:
+    """把「整轮中止」讲清楚，并以非 0 退出码收场。
+
+    原先这类失败会以 exit 0 结束、日志里还留着「全量更新完成」，只有人肉读日志才看得出没跑完。
+
+    Args:
+        abort_error: 触发中止的异常。
+
+    Raises:
+        SystemExit: 退出码 1。
+    """
+    logger.error("更新已中止：%s", abort_error)
+    logger.error("已提交的批次保留在库中，未提交的部分已回滚；排除网络/会话问题后重跑即可")
+    raise SystemExit(1) from abort_error
+
 def _run_update(task_func: Callable[[sqlite3.Connection], None]) -> None:
     """登录 Baostock → 执行任务 → 注销的统一流程。
 
     Args:
         task_func: 接收 SQLite 连接的数据更新函数。
+
+    Raises:
+        SystemExit: 任务被中止时以退出码 1 退出。
     """
     with contextlib.closing(sqlite3.connect(DB_PATH)) as connection:
         init_database(connection)
@@ -1184,6 +1191,8 @@ def _run_update(task_func: Callable[[sqlite3.Connection], None]) -> None:
         try:
             task_func(connection)
             connection.commit()
+        except BaostockUpdateAbortedError as abort_error:
+            _exit_on_update_aborted(abort_error)
         finally:
             logout_quietly()
 
@@ -1193,6 +1202,13 @@ def update_all_extended(connection: sqlite3.Connection, config: JsonObject) -> N
     Args:
         connection: 已打开的 SQLite 连接。
         config: 解析后的配置字典，须含 stocks 与 default_start_date 键。
+
+    Raises:
+        BaostockUpdateAbortedError: 任一结果集拉取不完整；已提交的批次保留，当前批次回滚。
+
+    Note:
+        按步骤提交，4/7 日 K 步另按每只股票提交：全量更新动辄数十分钟，末尾一次提交意味着
+        任何一处中止都会把前面跑完的成果一起丢掉。
     """
     stock_codes: list[str] = require_config_value(config, "stocks", CONFIG_FILE)
     default_start: str = require_config_value(config, "default_start_date", CONFIG_FILE)
@@ -1204,9 +1220,11 @@ def update_all_extended(connection: sqlite3.Connection, config: JsonObject) -> N
 
     logger.info("--- 2/7 行业分类 ---")
     update_industry(connection)
+    connection.commit()
 
     logger.info("--- 3/7 指数成分股 ---")
     update_index_constituents(connection)
+    connection.commit()
 
     if stock_codes:
         logger.info("--- 4/7 日K行情 ---")
@@ -1221,6 +1239,7 @@ def update_all_extended(connection: sqlite3.Connection, config: JsonObject) -> N
                 start = default_start
             if datetime.strptime(start, "%Y-%m-%d") <= datetime.today():
                 fetch_and_store_stock(connection, stock_code, start)
+                connection.commit()
 
     if stock_codes:
         logger.info("--- 5/7 财务数据 & 除权除息 & 业绩 ---")
@@ -1228,12 +1247,14 @@ def update_all_extended(connection: sqlite3.Connection, config: JsonObject) -> N
         update_dividend_data(connection, stock_codes)
         update_performance_express(connection, stock_codes)
         update_forecast_reports(connection, stock_codes)
+        connection.commit()
 
     logger.info("--- 6/7 宏观经济 ---")
     update_deposit_rates(connection)
     update_loan_rates(connection)
     update_reserve_ratios(connection)
     update_money_supply(connection)
+    connection.commit()
 
     logger.info("--- 7/7 交易日历 ---")
     update_trade_dates(connection)
@@ -1320,7 +1341,14 @@ def read_version() -> str:
     raise SystemExit(f"版本文件为空: {version_path}")
 
 def update_all() -> None:
-    """遍历配置中的股票代码，增量更新行情数据。"""
+    """遍历配置中的股票代码，增量更新行情数据。
+
+    Raises:
+        SystemExit: 行情结果集拉取不完整时以退出码 1 退出。
+
+    Note:
+        逐只提交：原先只在连接关闭时收尾，而关闭不提交等于整轮回滚——下载半天一行不落库。
+    """
     config = load_config_file(CONFIG_FILE)
     stock_codes: list[str] = require_config_value(config, "stocks", CONFIG_FILE)
     default_start: str = require_config_value(config, "default_start_date", CONFIG_FILE)
@@ -1353,6 +1381,9 @@ def update_all() -> None:
                     continue
 
                 fetch_and_store_stock(connection, stock_code, start)
+                connection.commit()
+        except BaostockUpdateAbortedError as abort_error:
+            _exit_on_update_aborted(abort_error)
         finally:
             logout_quietly()
             logger.info("Baostock 注销")
@@ -1376,6 +1407,8 @@ if __name__ == "__main__":
             else:
                 try:
                     sync_securities(connection)
+                except BaostockUpdateAbortedError as abort_error:
+                    _exit_on_update_aborted(abort_error)
                 finally:
                     logout_quietly()
     elif "--update-all" in sys.argv:

@@ -1,29 +1,93 @@
-"""bao_stock.py 单元测试：配置守卫与季度窗口推算（纯函数，不碰数据库与网络）。"""
+"""bao_stock.py 单元测试：配置守卫、季度窗口推算、结果集收集（不碰网络）。"""
 
 from __future__ import annotations
 
 import json
 import re
 import socket
+import sqlite3
 
+from collections.abc import Iterator
+from contextlib import closing
 from datetime import date
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 import bao_stock
 
 from bao_stock import (
+    BAOSTOCK_SESSION_LOST_ERROR_CODE,
     SOCKET_TIMEOUT_SECONDS,
+    BaostockPaginationInterruptedError,
+    BaostockSessionLostError,
+    BaostockUpdateAbortedError,
     _default_year_quarters,
+    _exit_on_update_aborted,
+    _get_previous_trading_date,
     _quarter_window_start,
+    _restrict_to_table_columns,
+    collect_rows_or_raise,
     enable_socket_timeout,
     load_config,
     load_config_file,
     logout_quietly,
     read_version,
     require_config_value,
+    update_index_constituents,
+    update_industry,
 )
+
+class _PagedResultSet:
+    """Baostock 结果集替身，按「页」模拟分页。
+
+    真结果集把「这一页没取到」写进 error_code 而**不抛异常**，`next()` 只返回 False；
+    替身照搬这一点，否则测不出收集函数有没有把「翻页失败」当成「读完了」。
+
+    Args:
+        pages: 每页的行列表。
+        fields: 字段名列表。
+        failing_page_index: 第几页（从 0 起）翻页时失败，None 表示全程顺利。
+        failure_code: 失败时写入 error_code 的错误码。
+        failure_msg: 失败时写入 error_msg 的文案。
+    """
+
+    def __init__(self, pages: list[list[list[str]]], fields: list[str], failing_page_index: int | None = None,
+                 failure_code: str = "10002007", failure_msg: str = "网络接收错误。") -> None:
+        self.fields = fields
+        self.error_code = "0"
+        self.error_msg = ""
+        self._pages = pages
+        self._page_index = 0
+        self._row_index = -1
+        self._failing_page_index = failing_page_index
+        self._failure_code = failure_code
+        self._failure_msg = failure_msg
+
+    def next(self) -> bool:
+        while True:
+            if self._row_index + 1 < len(self._pages[self._page_index]):
+                self._row_index += 1
+                return True
+            if self._page_index + 1 == self._failing_page_index:
+                self.error_code = self._failure_code
+                self.error_msg = self._failure_msg
+                return False
+            self._page_index += 1
+            if self._page_index >= len(self._pages):
+                return False
+            self._row_index = -1
+
+    def get_row_data(self) -> list[str]:
+        return self._pages[self._page_index][self._row_index]
+
+@pytest.fixture
+def initialized_connection(tmp_path: Path) -> Iterator[sqlite3.Connection]:
+    """建好表的临时库连接，用例结束即关闭。"""
+    with closing(sqlite3.connect(tmp_path / "test.db")) as connection:
+        bao_stock.init_database(connection)
+        yield connection
 
 def test_require_config_value_returns_configured_value() -> None:
     config = {"stocks": ["sh.600519"]}
@@ -107,3 +171,159 @@ def test_logout_quietly_swallows_logout_failure(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(bao_stock.bs, "logout", raise_network_error)
 
     logout_quietly()
+
+def test_collect_rows_or_raise_returns_rows_from_every_page() -> None:
+    result_set = _PagedResultSet([[["sh.600000"], ["sh.600004"]], [["sh.600006"]]], fields=["code"])
+
+    assert collect_rows_or_raise(result_set, "全市场证券列表") == [["sh.600000"], ["sh.600004"], ["sh.600006"]]
+
+def test_collect_rows_or_raise_rejects_result_set_truncated_mid_pagination() -> None:
+    result_set = _PagedResultSet([[["row-1"]], [["row-2"]], [["row-3"]]], fields=["code"], failing_page_index=2)
+
+    with pytest.raises(BaostockPaginationInterruptedError) as raised_error:
+        collect_rows_or_raise(result_set, "行业分类")
+
+    assert "行业分类" in str(raised_error.value)
+    assert "已取 2 行" in str(raised_error.value)
+
+def test_collect_rows_or_raise_reports_lost_session() -> None:
+    result_set = _PagedResultSet(
+        [[["row-1"]], [["row-2"]]],
+        fields=["code"],
+        failing_page_index=1,
+        failure_code=BAOSTOCK_SESSION_LOST_ERROR_CODE,
+        failure_msg="用户未登录",
+    )
+
+    with pytest.raises(BaostockSessionLostError) as raised_error:
+        collect_rows_or_raise(result_set, "行业分类")
+
+    assert BAOSTOCK_SESSION_LOST_ERROR_CODE in str(raised_error.value)
+
+def test_collect_rows_or_raise_rejects_missing_result_set() -> None:
+    with pytest.raises(BaostockUpdateAbortedError):
+        collect_rows_or_raise(None, "行业分类")
+
+def test_baostock_update_aborted_error_keeps_runtime_error_contract() -> None:
+    assert issubclass(BaostockUpdateAbortedError, RuntimeError)
+
+def test_exit_on_update_aborted_exits_with_non_zero_code() -> None:
+    """中止必须以非 0 退出码收场：原先这类失败以 exit 0 结束，只有读日志才看得出没跑完。"""
+    with pytest.raises(SystemExit) as raised_error:
+        _exit_on_update_aborted(BaostockSessionLostError("行业分类: 会话已失效（10001001 用户未登录）"))
+
+    assert raised_error.value.code == 1
+
+def test_restrict_to_table_columns_drops_interface_column_with_same_case_insensitive_name() -> None:
+    frame = pd.DataFrame([{"updateDate": "2026-10-05", "code": "sh.600000", "UpdateDate": "2026-10-10"}])
+
+    restricted_frame = _restrict_to_table_columns(frame, ["UpdateDate"])
+
+    assert list(restricted_frame.columns) == ["UpdateDate"]
+    assert restricted_frame["UpdateDate"].tolist() == ["2026-10-10"]
+
+def test_update_all_commits_downloaded_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--update` 原先整轮不提交：连接关闭即回滚，下载完一行不落库。"""
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"stocks": ["sh.600000"], "default_start_date": "2000-01-01"}), encoding="utf-8"
+    )
+    database_path = tmp_path / "stock_data.db"
+    downloaded_rows: list[tuple[str, str]] = []
+
+    def store_downloaded_row(connection: sqlite3.Connection, stock_code: str, start_date: str) -> int:
+        connection.execute(
+            "INSERT INTO DailyRawPrices (Code, Date) VALUES (?, ?)", (stock_code, start_date)
+        )
+        downloaded_rows.append((stock_code, start_date))
+        return 1
+
+    class _SuccessfulLogin:
+        error_code: str = "0"
+
+    monkeypatch.setattr(bao_stock, "CONFIG_FILE", str(config_path))
+    monkeypatch.setattr(bao_stock, "DB_PATH", str(database_path))
+    monkeypatch.setattr(bao_stock, "login_with_retry", lambda *args, **kwargs: _SuccessfulLogin())
+    monkeypatch.setattr(bao_stock, "sync_securities", lambda connection: None)
+    monkeypatch.setattr(bao_stock, "fetch_and_store_stock", store_downloaded_row)
+    monkeypatch.setattr(bao_stock, "logout_quietly", lambda: None)
+
+    bao_stock.update_all()
+
+    with closing(sqlite3.connect(database_path)) as reopened_connection:
+        stored_rows = reopened_connection.execute("SELECT Code, Date FROM DailyRawPrices").fetchall()
+
+    assert downloaded_rows == [("sh.600000", "2000-01-01")]
+    assert stored_rows == [("sh.600000", "2000-01-01")]
+
+def test_update_industry_keeps_own_update_date_and_survives_second_run(
+    initialized_connection: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """接口字段 updateDate 若顶掉我方的 UpdateDate，重跑必撞 (Code, UpdateDate) 主键。"""
+    monkeypatch.setattr(
+        bao_stock.bs,
+        "query_stock_industry",
+        lambda: _PagedResultSet(
+            [[["2026-10-05", "sh.600000", "浦发银行", "J66货币金融服务", "证监会行业分类"]]],
+            fields=["updateDate", "code", "code_name", "industry", "industryClassification"],
+        ),
+    )
+
+    update_industry(initialized_connection)
+    update_industry(initialized_connection)
+
+    stored_rows = initialized_connection.execute(
+        "SELECT Code, UpdateDate FROM IndustryClassification"
+    ).fetchall()
+
+    assert stored_rows == [("sh.600000", date.today().isoformat())]
+
+def test_update_index_constituents_keeps_base_date_and_survives_second_run(
+    initialized_connection: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """与行业分类同根：接口的 updateDate 顶掉我方 UpdateDate 后，重跑必撞 (IndexCode, Code, UpdateDate) 主键。"""
+    monkeypatch.setattr(
+        bao_stock.bs,
+        "query_trade_dates",
+        lambda start_date, end_date: _PagedResultSet(
+            [[["2026-10-09", "1"]]], fields=["calendar_date", "is_trading_day"]
+        ),
+    )
+    for query_name in ("query_hs300_stocks", "query_sz50_stocks", "query_zz500_stocks"):
+        monkeypatch.setattr(
+            bao_stock.bs,
+            query_name,
+            lambda query_date: _PagedResultSet(
+                [[["2026-10-05", "sh.600000", "浦发银行"]]], fields=["updateDate", "code", "code_name"]
+            ),
+        )
+
+    update_index_constituents(initialized_connection)
+    update_index_constituents(initialized_connection)
+
+    stored_rows = initialized_connection.execute(
+        "SELECT IndexCode, Code, UpdateDate FROM IndexConstituents ORDER BY IndexCode"
+    ).fetchall()
+
+    assert stored_rows == [
+        ("hs300", "sh.600000", "2026-10-09"),
+        ("sz50", "sh.600000", "2026-10-09"),
+        ("zz500", "sh.600000", "2026-10-09"),
+    ]
+
+def test_get_previous_trading_date_aborts_when_session_lost(monkeypatch: pytest.MonkeyPatch) -> None:
+    """接口拉取不完整时中止，而不是悄悄回退到「今天」——回退会让证券同步基准日悄悄变成非交易日。"""
+    monkeypatch.setattr(
+        bao_stock.bs,
+        "query_trade_dates",
+        lambda start_date, end_date: _PagedResultSet(
+            [[["2026-10-09", "1"]]],
+            fields=["calendar_date", "is_trading_day"],
+            failing_page_index=1,
+            failure_code=BAOSTOCK_SESSION_LOST_ERROR_CODE,
+            failure_msg="用户未登录",
+        ),
+    )
+
+    with pytest.raises(BaostockSessionLostError):
+        _get_previous_trading_date()

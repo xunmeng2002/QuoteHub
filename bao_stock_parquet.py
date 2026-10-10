@@ -55,7 +55,7 @@ import pyarrow.parquet as pq
 from bao_stock import (
     DB_PATH,
     JsonObject,
-    _collect_rows,
+    collect_rows_or_raise,
     enable_socket_timeout,
     init_database,
     load_config_file,
@@ -188,30 +188,6 @@ def resolve_output_root(command_line_output_root: str | None, config: JsonObject
 
 # ---------- BaoStock 拉取 ----------
 
-def collect_rows_or_raise(result_set: Any, stock_code: str) -> list[list[str]]:
-    """收集结果集；分页中途失败时**抛**，而不是静默截断。
-
-    `_collect_rows` 的 while 条件是 `error_code == "0"`，中途某一页失败时它只是跳出循环、把已经
-    拿到的行返回。调用方若照此入库，得到的是一个**截断却看不出被截断**的帧；再把它记进
-    `QueriedBarSpans` 的账，那个洞就再也不会被补。故收集完必须再看一次错误码。
-
-    Args:
-        result_set: Baostock 查询返回的结果集对象。
-        stock_code: 证券代码，仅用于拼错误提示。
-
-    Returns:
-        行列表，每行为字段字符串列表。
-
-    Raises:
-        RuntimeError: 分页过程中出错（此时返回的行不完整）。
-    """
-    rows = _collect_rows(result_set)
-
-    if result_set.error_code != "0":
-        raise RuntimeError(f"结果集分页中断: {stock_code} {result_set.error_msg}")
-
-    return rows
-
 def query_minute_bars(stock_code: str, start_date: str, end_date: str, frequency: str) -> pd.DataFrame:
     """拉取分钟 K 线并转为数值 DataFrame（BaoStock 返回值全为字符串）。
 
@@ -235,9 +211,10 @@ def query_minute_bars(stock_code: str, start_date: str, end_date: str, frequency
         frequency=frequency,
         adjustflag="3",
     )
-    if result_set.error_code != "0":
-        raise RuntimeError(f"query_history_k_data_plus 失败: {stock_code} {result_set.error_msg}")
-    minute_frame = pd.DataFrame(collect_rows_or_raise(result_set, stock_code), columns=MINUTE_K_FIELDS.split(","))
+    minute_frame = pd.DataFrame(
+        collect_rows_or_raise(result_set, f"{stock_code} 分钟K线"),
+        columns=MINUTE_K_FIELDS.split(","),
+    )
     for column in ("open", "high", "low", "close", "volume", "amount"):
         minute_frame[column] = pd.to_numeric(minute_frame[column], errors="coerce")
     invalid_count = int(minute_frame["close"].isna().sum())
@@ -268,9 +245,10 @@ def query_daily_bars(stock_code: str, start_date: str, end_date: str) -> pd.Data
         frequency="d",
         adjustflag="3",
     )
-    if result_set.error_code != "0":
-        raise RuntimeError(f"query_history_k_data_plus 失败: {stock_code} {result_set.error_msg}")
-    daily_frame = pd.DataFrame(collect_rows_or_raise(result_set, stock_code), columns=DAILY_K_FIELDS.split(","))
+    daily_frame = pd.DataFrame(
+        collect_rows_or_raise(result_set, f"{stock_code} 日线"),
+        columns=DAILY_K_FIELDS.split(","),
+    )
     for column in ("preclose", "volume", "amount"):
         daily_frame[column] = pd.to_numeric(daily_frame[column], errors="coerce")
     return daily_frame.set_index("date")
