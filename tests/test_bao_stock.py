@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -34,7 +35,7 @@ def test_require_config_value_names_config_file_and_cli_alternative() -> None:
     assert "bao_stock_parquet.json" in message
     assert "--output-root" in message
 
-def test_load_config_file_exits_when_file_missing(tmp_path) -> None:
+def test_load_config_file_exits_when_file_missing(tmp_path: Path) -> None:
     missing_config = tmp_path / "bao_stock.json"
 
     with pytest.raises(SystemExit) as exit_info:
@@ -42,13 +43,13 @@ def test_load_config_file_exits_when_file_missing(tmp_path) -> None:
 
     assert f"配置文件不存在: {missing_config}" in str(exit_info.value)
 
-def test_load_config_file_returns_parsed_json(tmp_path) -> None:
+def test_load_config_file_returns_parsed_json(tmp_path: Path) -> None:
     config_path = tmp_path / "bao_stock.json"
     config_path.write_text(json.dumps({"stocks": ["sz.000001"]}), encoding="utf-8")
 
     assert load_config_file(str(config_path)) == {"stocks": ["sz.000001"]}
 
-def test_load_config_reads_json_file(tmp_path) -> None:
+def test_load_config_reads_json_file(tmp_path: Path) -> None:
     config_path = tmp_path / "any.json"
     config_path.write_text('{"stocks": []}', encoding="utf-8")
 
