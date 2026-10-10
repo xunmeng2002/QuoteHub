@@ -66,7 +66,7 @@ pip install baostock pandas pyarrow
 
 > **注意**：`parquet_output_root` 是**相对当前工作目录**解析的，不是相对配置文件。故仍须在 QuoteHub 仓根运行（见 2.2）。示例值 `../QuantTrading/MdBaoStock` 指向 QuantTrading 仓根下的 `MdBaoStock`，与隔壁仓 `BackTest.json` 的 `MdDataPath` 指向同一实体。
 
-建表由 `BaoStock.init_database` 自动完成（`sql/upgrades/Update_v2.1.0.sql`），首次连接即生效，无需手工执行 SQL。
+建表由 `bao_stock.init_database` 自动完成（`sql/upgrades/Update_v2.1.0.sql`），首次连接即生效，无需手工执行 SQL。
 
 ## 3 子命令
 

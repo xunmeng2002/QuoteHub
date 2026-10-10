@@ -1,4 +1,4 @@
--- v2.1.0: 分钟线落库（BaoStockParquet 管线的事实源）
+-- v2.1.0: 分钟线落库（bao_stock_parquet 管线的事实源）
 -- 分钟 K 线。Code 为 sh./sz. 合并形式；Frequency 为分钟数（'5'/'15'/'30'/'60'，文件名后缀加 m）；
 -- Time 为 BaoStock 原生 bar 结束时间 'YYYYMMDDHHMMSSsss'；
 -- Volume/Amount 为本周期增量（口径由脚本与日线统计交叉校验）。

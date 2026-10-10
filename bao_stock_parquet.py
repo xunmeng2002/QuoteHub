@@ -26,8 +26,8 @@ Parquet 文件成为数据库的纯再导出（不做文件侧合并），从根
     - 文件名带频率后缀（_5m）：四种频率可并存于同一目录，回测按 Identity 目录 + 日期过滤。
     - 股票回测需在 QuantTrading 的 BackTest.json 中将 MdDataPath 指向 output_root，
       ExchangeID 用 SSE/SZSE，InstrumentID 用 6 位代码（如 600519）。
-    - SQLite 路径复用 BaoStock.DB_PATH（stock_data.db），须在 QuoteHub 目录下运行；
-      建表由 BaoStock.init_database 自动应用（sql/upgrades/Update_v2.1.0.sql）。
+    - SQLite 路径复用 bao_stock.DB_PATH（stock_data.db），须在 QuoteHub 目录下运行；
+      建表由 bao_stock.init_database 自动应用（加载 sql/schema/Create_v1.0.0.sql 后依次执行 sql/upgrades/ 下全部脚本）。
     - 配置键均**无代码兜底**，一律必填，缺任一即报错退出；但只在真正用到它的
       子命令上要求：parquet_output_root 与 stocks 每个子命令都要（另有
       --output-root / --codes 命令行替代），default_start_date 仅 update 需要。
