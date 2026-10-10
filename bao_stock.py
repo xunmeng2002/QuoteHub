@@ -51,7 +51,18 @@ logger = logging.getLogger(__name__)
 
 
 def _collect_rows(result_set: Any) -> list[list[str]]:
-    """将 Baostock 结果集全部拉取为行列表。"""
+    """将 Baostock 结果集全部拉取为行列表。
+
+    Args:
+        result_set: Baostock 查询返回的结果集对象。
+
+    Returns:
+        行列表，每行为字段字符串列表。
+
+    Note:
+        分页中途失败时只是跳出循环、返回已取到的行，不抛异常；需要「要么全有、
+        要么报错」时改用 `bao_stock_parquet.collect_rows_or_raise`。
+    """
     rows: list[list[str]] = []
     while (result_set.error_code == "0") and result_set.next():
         rows.append(result_set.get_row_data())
@@ -65,6 +76,15 @@ def login_with_retry(
     max_retries: int = MAX_LOGIN_RETRIES,
     delay: int = RETRY_DELAY_SECONDS,
 ) -> Any | None:
+    """带重试地登录 Baostock。
+
+    Args:
+        max_retries: 最大尝试次数，默认 MAX_LOGIN_RETRIES。
+        delay: 两次尝试之间的等待秒数，默认 RETRY_DELAY_SECONDS。
+
+    Returns:
+        登录成功返回登录结果对象；用完次数仍失败返回 None，由调用方决定是否中止。
+    """
     for attempt in range(max_retries):
         login_result = bs.login()
         if login_result.error_code == "0":
@@ -82,7 +102,11 @@ def login_with_retry(
 
 
 def init_database(connection: sqlite3.Connection) -> None:
-    """初始化数据库：加载基础 Schema 后执行增量升级脚本。"""
+    """初始化数据库：加载基础 Schema 后执行增量升级脚本，并迁移旧表结构。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+    """
     base_dir = os.path.dirname(os.path.abspath(__file__))
 
     schema_dir = os.path.join(base_dir, "sql", "schema")
@@ -188,6 +212,15 @@ def get_last_date(
     connection: sqlite3.Connection,
     stock_code: str,
 ) -> str | None:
+    """查库中该证券原始日线的最新日期，供增量下载算起点。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_code: Baostock 格式证券代码，如 'sh.600519'。
+
+    Returns:
+        最新日期 'YYYY-MM-DD'；库中无该证券数据返回 None。
+    """
     cursor = connection.execute(
         """SELECT
                MAX(Date)
@@ -211,8 +244,13 @@ def fetch_and_store_stock(
 ) -> int:
     """下载单只股票的日K数据及复权因子，写入数据库。
 
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_code: Baostock 格式证券代码，如 'sh.600519'。
+        start_date: 下载起始日期 'YYYY-MM-DD'（含）。
+
     Returns:
-        写入的价格行数。
+        写入 DailyRawPrices 的价格行数；无新数据或价格查询失败返回 0。
     """
     # 原始价格：不复权（Baostock adjustflag="3"）
     price_result = bs.query_history_k_data_plus(
@@ -288,6 +326,9 @@ def sync_securities(connection: sqlite3.Connection) -> None:
 
     从 Baostock 拉取最新全市场证券列表，与本地 securities 表对比，
     自动处理：新股 IPO → 插入，退市 → 标记，更名/停复牌 → 记录日志。
+
+    Args:
+        connection: 已打开的 SQLite 连接（须已执行 init_database）。
     """
     # 用最近一个交易日查询，避免当天盘中数据未就绪
     query_date = _get_previous_trading_date(connection) or datetime.today().strftime(
@@ -442,10 +483,19 @@ def _fetch_and_store_financial(
     """通用财务数据采集器。
 
     调用 Baostock 财务查询接口，将结果写入指定 SQLite 表。
-    写入前会删除相同 (Code, Year, Quarter) 的旧数据。
+    写入前会删除相同 (Code, Year, Quarter) 的旧数据，故重跑幂等。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        code: Baostock 格式证券代码。
+        year: 会计年度。
+        quarter: 季度 1-4。
+        query_func: Baostock 财务查询函数，接收 (code, year, quarter) 三个字符串参数。
+        table_name: 目标表名；调用方以字面量传入，不来自外部输入。
+        numeric_fields: 需转为数值类型的列名列表。
 
     Returns:
-        写入行数。
+        写入行数；接口无返回值、报错或无数据时返回 0。
     """
     connection.execute(
         f"DELETE FROM {table_name} WHERE Code = ? AND Year = ? AND Quarter = ?",
@@ -488,7 +538,11 @@ def _fetch_and_store_financial(
 
 
 def _default_year_quarters() -> list[tuple[int, int]]:
-    """获取最近 4 个季度的 (year, quarter) 列表（按时间升序）。"""
+    """获取最近 4 个季度的 (year, quarter) 列表（按时间升序）。
+
+    Returns:
+        4 个 (年, 季) 元组，最早的一季在前。
+    """
     today = datetime.today()
     quarters: list[tuple[int, int]] = []
     for i in range(4):
@@ -500,7 +554,14 @@ def _default_year_quarters() -> list[tuple[int, int]]:
 
 
 def _quarter_window_start(quarters_back: int = 4) -> str:
-    """最近 quarters_back 个季度窗口的起始日期（最早那季的首日），供按日期区间查询的接口使用。"""
+    """最近 quarters_back 个季度窗口的起始日期（最早那季的首日），供按日期区间查询的接口使用。
+
+    Args:
+        quarters_back: 向前回溯的季度数，默认 4。
+
+    Returns:
+        该季度首日 'YYYY-MM-01'。
+    """
     today = datetime.today()
     quarter_start_month_index = (today.month - 1) // 3 * 3
     total_months = today.year * 12 + quarter_start_month_index - quarters_back * 3
@@ -521,8 +582,10 @@ def update_financial_data(
     """遍历股票列表，下载 6 大财务指标数据。
 
     Args:
-        years: 指定年份列表，默认最近 4 个季度的年份。
-        quarters: 指定季度列表，默认 [1,2,3,4]。
+        connection: 已打开的 SQLite 连接。
+        stock_codes: Baostock 格式证券代码列表。
+        years: 指定年份列表；与 quarters 任一为 None 时改取最近 4 个季度。
+        quarters: 指定季度列表 1-4；与 years 任一为 None 时改取最近 4 个季度。
     """
     if years is None or quarters is None:
         yq_pairs = _default_year_quarters()
@@ -599,7 +662,13 @@ def update_dividend_data(
     stock_codes: list[str],
     years: list[int] | None = None,
 ) -> None:
-    """下载除权除息信息。"""
+    """下载除权除息信息。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_codes: Baostock 格式证券代码列表。
+        years: 指定年份列表，默认最近 4 年（含今年）。
+    """
     if years is None:
         today = datetime.today()
         years = list(range(today.year - 3, today.year + 1))
@@ -668,7 +737,14 @@ def update_performance_express(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> None:
-    """下载业绩快报。接口按日期区间查询（非年+季），Year/Quarter 由统计日期推导。"""
+    """下载业绩快报。接口按日期区间查询（非年+季），Year/Quarter 由统计日期推导。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_codes: Baostock 格式证券代码列表。
+        start_date: 区间起始日 'YYYY-MM-DD'；为 None 时取最近 4 个季度窗口起点。
+        end_date: 区间结束日 'YYYY-MM-DD'；为 None 时取今天。
+    """
     start_date = start_date or _quarter_window_start()
     end_date = end_date or datetime.today().strftime("%Y-%m-%d")
     total = 0
@@ -737,7 +813,14 @@ def update_forecast_reports(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> None:
-    """下载业绩预告。接口按日期区间查询（非年+季），Year/Quarter 由统计日期推导。"""
+    """下载业绩预告。接口按日期区间查询（非年+季），Year/Quarter 由统计日期推导。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_codes: Baostock 格式证券代码列表。
+        start_date: 区间起始日 'YYYY-MM-DD'；为 None 时取最近 4 个季度窗口起点。
+        end_date: 区间结束日 'YYYY-MM-DD'；为 None 时取今天。
+    """
     start_date = start_date or _quarter_window_start()
     end_date = end_date or datetime.today().strftime("%Y-%m-%d")
     total = 0
@@ -794,7 +877,11 @@ def update_forecast_reports(
 
 
 def update_index_constituents(connection: sqlite3.Connection) -> None:
-    """更新沪深300 / 上证50 / 中证500 成分股。"""
+    """更新沪深300 / 上证50 / 中证500 成分股。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+    """
     query_date = _get_previous_trading_date(connection) or datetime.today().strftime(
         "%Y-%m-%d"
     )
@@ -840,7 +927,11 @@ def update_index_constituents(connection: sqlite3.Connection) -> None:
 
 
 def update_industry(connection: sqlite3.Connection) -> None:
-    """更新行业分类信息，同时更新 Securities 表中的行业字段。"""
+    """更新行业分类信息，同时更新 Securities 表中的行业字段。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+    """
     today = datetime.today().strftime("%Y-%m-%d")
 
     result = bs.query_stock_industry()
@@ -904,7 +995,13 @@ def update_trade_dates(
     start_date: str = "1990-12-19",
     end_date: str | None = None,
 ) -> None:
-    """更新交易日历。"""
+    """更新交易日历。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        start_date: 区间起始日 'YYYY-MM-DD'，默认 '1990-12-19'（Baostock 数据起点）。
+        end_date: 区间结束日 'YYYY-MM-DD'，默认今天。
+    """
     if end_date is None:
         end_date = datetime.today().strftime("%Y-%m-%d")
 
@@ -939,7 +1036,11 @@ def update_trade_dates(
 
 
 def update_deposit_rates(connection: sqlite3.Connection) -> None:
-    """更新存款利率。"""
+    """更新存款利率（清空重取，起始日固定 2000-01-01）。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+    """
     connection.execute("DELETE FROM DepositRates")
     result = bs.query_deposit_rate_data(start_date="2000-01-01")
     if result is None:
@@ -981,7 +1082,11 @@ def update_deposit_rates(connection: sqlite3.Connection) -> None:
 
 
 def update_loan_rates(connection: sqlite3.Connection) -> None:
-    """更新贷款利率。"""
+    """更新贷款利率（清空重取，起始日固定 2000-01-01）。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+    """
     connection.execute("DELETE FROM LoanRates")
     result = bs.query_loan_rate_data(start_date="2000-01-01")
     if result is None:
@@ -1019,7 +1124,11 @@ def update_loan_rates(connection: sqlite3.Connection) -> None:
 
 
 def update_reserve_ratios(connection: sqlite3.Connection) -> None:
-    """更新存款准备金率。"""
+    """更新存款准备金率（清空重取，起始日固定 2000-01-01）。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+    """
     connection.execute("DELETE FROM ReserveRatios")
     result = bs.query_required_reserve_ratio_data(start_date="2000-01-01")
     if result is None:
@@ -1054,7 +1163,11 @@ def update_reserve_ratios(connection: sqlite3.Connection) -> None:
 
 
 def update_money_supply(connection: sqlite3.Connection) -> None:
-    """更新月度货币供应量（M0/M1/M2）。"""
+    """更新月度货币供应量（M0/M1/M2，清空重取，起始月固定 2000-01）。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+    """
     connection.execute("DELETE FROM MoneySupply")
     end_month = datetime.today().strftime("%Y-%m")
     result = bs.query_money_supply_data_month(
@@ -1105,7 +1218,11 @@ def update_money_supply(connection: sqlite3.Connection) -> None:
 
 
 def _run_update(task_func: Callable[[sqlite3.Connection], None]) -> None:
-    """登录 Baostock → 执行任务 → 注销的统一流程。"""
+    """登录 Baostock → 执行任务 → 注销的统一流程。
+
+    Args:
+        task_func: 接收 SQLite 连接的数据更新函数。
+    """
     with contextlib.closing(sqlite3.connect(DB_PATH)) as connection:
         init_database(connection)
         login_result = login_with_retry()
@@ -1122,7 +1239,12 @@ def _run_update(task_func: Callable[[sqlite3.Connection], None]) -> None:
 def update_all_extended(
     connection: sqlite3.Connection, config: dict[str, Any]
 ) -> None:
-    """全量更新所有数据类别。"""
+    """全量更新所有数据类别。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        config: 解析后的配置字典，须含 stocks 键。
+    """
     stock_codes: list[str] = require_config_value(config, "stocks", CONFIG_FILE)
 
     logger.info("===== 全量更新开始 =====")
@@ -1175,7 +1297,14 @@ def update_all_extended(
 
 
 def load_config(config_path: str) -> dict[str, Any]:
-    """读取 JSON 配置文件。"""
+    """读取 JSON 配置文件。
+
+    Args:
+        config_path: 配置文件路径。
+
+    Returns:
+        解析后的配置字典。
+    """
     with open(config_path, "r", encoding="utf-8") as file:
         return json.load(file)
 
@@ -1184,6 +1313,15 @@ def load_config_file(config_file: str) -> dict[str, Any]:
     """读取配置文件；文件不存在即报错退出——不伪造一份空配置顶上。
 
     原先文件缺失时返回 `{"stocks": []}`，于是"配置没写"与"配置写空"表现一致。
+
+    Args:
+        config_file: 配置文件路径。
+
+    Returns:
+        解析后的配置字典。
+
+    Raises:
+        SystemExit: 配置文件不存在。
     """
     if not os.path.exists(config_file):
         raise SystemExit(f"配置文件不存在: {config_file}")
@@ -1200,6 +1338,18 @@ def require_config_value(
 
     兜底会让"配置漏写"与"配置写对"表现一致：代码清单悄悄变空、输出路径悄悄落到别处，
     两者都没有任何提示。缺了就直接失败，把问题停在启动那一刻。
+
+    Args:
+        config: 解析后的配置字典。
+        config_key: 配置键名。
+        config_file: 配置文件名，仅用于拼错误提示。
+        command_line_alternative: 等价的命令行参数名；给出后错误提示会附带该替代途径。
+
+    Returns:
+        配置项的值。
+
+    Raises:
+        SystemExit: 配置项缺失、为空或为空集合。
     """
     config_value = config.get(config_key)
     if not config_value:
@@ -1284,6 +1434,13 @@ if __name__ == "__main__":
         config = load_config_file(CONFIG_FILE)
         stock_codes = require_config_value(config, "stocks", CONFIG_FILE)
         def _update_reports(conn: sqlite3.Connection) -> None:
+            """业绩快报与业绩预告的合并任务，供 _run_update 调用。
+
+            证券代码取自所在分支的闭包变量 stock_codes，不由本函数接收。
+
+            Args:
+                conn: 由 _run_update 打开并传入的 SQLite 连接。
+            """
             update_performance_express(conn, stock_codes)
             update_forecast_reports(conn, stock_codes)
         _run_update(_update_reports)
@@ -1295,6 +1452,11 @@ if __name__ == "__main__":
         _run_update(update_trade_dates)
     elif "--update-macro" in sys.argv:
         def _update_macro(conn: sqlite3.Connection) -> None:
+            """宏观经济 4 类数据的合并任务，供 _run_update 调用。
+
+            Args:
+                conn: 由 _run_update 打开并传入的 SQLite 连接。
+            """
             update_deposit_rates(conn)
             update_loan_rates(conn)
             update_reserve_ratios(conn)

@@ -104,7 +104,17 @@ STOCK_EXCHANGE_PREFIXES = {"sh": "SSE", "sz": "SZSE"}
 
 
 def split_stock_code(stock_code: str) -> tuple[str, str]:
-    """拆分 'sh.600519' 为交易所代码与 6 位证券代码。"""
+    """拆分 'sh.600519' 为交易所代码与 6 位证券代码。
+
+    Args:
+        stock_code: Baostock 格式证券代码，交易所前缀大小写不限。
+
+    Returns:
+        (交易所代码, 6 位证券代码)；交易所代码取 'SSE' / 'SZSE'。
+
+    Raises:
+        ValueError: 交易所前缀无法识别，或 "." 后缺少证券代码。
+    """
     prefix, _, instrument_id = stock_code.partition(".")
     exchange_id = STOCK_EXCHANGE_PREFIXES.get(prefix.lower())
     if exchange_id is None or not instrument_id:
@@ -113,7 +123,17 @@ def split_stock_code(stock_code: str) -> tuple[str, str]:
 
 
 def group_codes_by_exchange(stock_codes: list[str]) -> dict[str, list[str]]:
-    """按交易所分组证券代码（同一天/月/年的文件按交易所聚合全部代码）。"""
+    """按交易所分组证券代码（同一天/月/年的文件按交易所聚合全部代码）。
+
+    Args:
+        stock_codes: Baostock 格式证券代码列表。
+
+    Returns:
+        交易所代码 → 该所证券代码列表，组内保持输入顺序。
+
+    Raises:
+        ValueError: 列表中含无法识别的证券代码。
+    """
     codes_by_exchange: dict[str, list[str]] = {}
     for stock_code in stock_codes:
         exchange_id, _ = split_stock_code(stock_code)
@@ -122,7 +142,14 @@ def group_codes_by_exchange(stock_codes: list[str]) -> dict[str, list[str]]:
 
 
 def to_sqlite_value(value: Any) -> Any:
-    """NaN 一律转 None（SQLite 将 NaN 存为 NULL，显式转换避免依赖该隐式行为）。"""
+    """NaN 一律转 None（SQLite 将 NaN 存为 NULL，显式转换避免依赖该隐式行为）。
+
+    Args:
+        value: 待入库的标量。
+
+    Returns:
+        NaN 对应 None，其余原样返回。
+    """
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
     return value
@@ -135,6 +162,17 @@ def resolve_output_root(command_line_output_root: str | None, config: dict[str, 
     `require_config_value`）。配置里的相对值按**当前工作目录**（而非配置文件所在目录）
     解析，故归一化后打印生效值：否则在别的目录运行会在克隆旁静默建树（`os.makedirs`
     不报错），回测侧看不到。
+
+    Args:
+        command_line_output_root: 命令行 --output-root，可为 None。
+        config: 解析后的配置字典。
+        config_file: 配置文件名，仅用于拼错误提示。
+
+    Returns:
+        绝对路径形式的输出根。
+
+    Raises:
+        SystemExit: 命令行与配置里都没有输出根。
     """
     configured_output_root = command_line_output_root or require_config_value(config, CONFIG_KEY_OUTPUT_ROOT, config_file, "--output-root")
     absolute_output_root = os.path.abspath(configured_output_root)
@@ -151,6 +189,16 @@ def collect_rows_or_raise(result_set: Any, stock_code: str) -> list[list[str]]:
     `_collect_rows` 的 while 条件是 `error_code == "0"`，中途某一页失败时它只是跳出循环、把已经
     拿到的行返回。调用方若照此入库，得到的是一个**截断却看不出被截断**的帧；再把它记进
     `QueriedBarSpans` 的账，那个洞就再也不会被补。故收集完必须再看一次错误码。
+
+    Args:
+        result_set: Baostock 查询返回的结果集对象。
+        stock_code: 证券代码，仅用于拼错误提示。
+
+    Returns:
+        行列表，每行为字段字符串列表。
+
+    Raises:
+        RuntimeError: 分页过程中出错（此时返回的行不完整）。
     """
     rows = _collect_rows(result_set)
 
@@ -166,7 +214,20 @@ def query_minute_bars(
     end_date: str,
     frequency: str,
 ) -> pd.DataFrame:
-    """拉取分钟 K 线并转为数值 DataFrame（BaoStock 返回值全为字符串）。"""
+    """拉取分钟 K 线并转为数值 DataFrame（BaoStock 返回值全为字符串）。
+
+    Args:
+        stock_code: Baostock 格式证券代码。
+        start_date: 起始日期 'YYYY-MM-DD'（含）。
+        end_date: 结束日期 'YYYY-MM-DD'（含）。
+        frequency: 分钟频率 '5' / '15' / '30' / '60'。
+
+    Returns:
+        按 time 升序的分钟帧；close 缺失的 bar（停牌等）已丢弃。
+
+    Raises:
+        RuntimeError: 查询失败或分页中断。
+    """
     result_set = bs.query_history_k_data_plus(
         stock_code,
         MINUTE_K_FIELDS,
@@ -188,7 +249,19 @@ def query_minute_bars(
 
 
 def query_daily_bars(stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """拉取日线（取 preclose 供分钟 bar 首根回填，volume/amount 供口径交叉校验）。"""
+    """拉取日线（取 preclose 供分钟 bar 首根回填，volume/amount 供口径交叉校验）。
+
+    Args:
+        stock_code: Baostock 格式证券代码。
+        start_date: 起始日期 'YYYY-MM-DD'（含）。
+        end_date: 结束日期 'YYYY-MM-DD'（含）。
+
+    Returns:
+        以 date 为索引的日线帧。
+
+    Raises:
+        RuntimeError: 查询失败或分页中断。
+    """
     result_set = bs.query_history_k_data_plus(
         stock_code,
         DAILY_K_FIELDS,
@@ -209,6 +282,13 @@ def detect_cumulative_mode(bar_values: list[float], daily_total: float) -> bool:
     """判别单日分钟量额是日内累计（True）还是本周期增量（False）。
 
     累计口径的判据：序列单调不减且末值≈当日总量；全零或对不上时按增量处理。
+
+    Args:
+        bar_values: 单日各 bar 的量或额，按时间升序。
+        daily_total: 当日日线总量；为 None 或 NaN 时无从比对，按增量处理。
+
+    Returns:
+        True 表示该列为日内累计口径。
     """
     if daily_total is None or pd.isna(daily_total) or not bar_values:
         return False
@@ -223,13 +303,25 @@ def detect_cumulative_mode(bar_values: list[float], daily_total: float) -> bool:
 
 
 def connect_database() -> sqlite3.Connection:
+    """打开数据库连接并确保 Schema 已就绪。
+
+    Returns:
+        SQLite 连接；调用方须用 `contextlib.closing` 保证关闭。
+    """
     connection = sqlite3.connect(DB_PATH)
     init_database(connection)
     return connection
 
 
 def upsert_minute_bars(connection: sqlite3.Connection, stock_code: str, frequency: str, minute_frame: pd.DataFrame) -> None:
-    """分钟 bar 原始值入库，主键（Code, Frequency, Time）保证重复拉取幂等。"""
+    """分钟 bar 原始值入库，主键（Code, Frequency, Time）保证重复拉取幂等。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_code: Baostock 格式证券代码。
+        frequency: 分钟频率。
+        minute_frame: query_minute_bars 返回的分钟帧。
+    """
     records = [
         (
             stock_code, frequency, row.date, row.time,
@@ -248,7 +340,13 @@ def upsert_minute_bars(connection: sqlite3.Connection, stock_code: str, frequenc
 
 
 def upsert_trading_day_stats(connection: sqlite3.Connection, stock_code: str, daily_frame: pd.DataFrame) -> None:
-    """日度统计（preclose/volume/amount）入库，主键（Code, TradingDay）保证幂等。"""
+    """日度统计（preclose/volume/amount）入库，主键（Code, TradingDay）保证幂等。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_code: Baostock 格式证券代码。
+        daily_frame: query_daily_bars 返回的日线帧（以 date 为索引）。
+    """
     stats_frame = daily_frame.reset_index()
     records = [
         (stock_code, row.date, to_sqlite_value(row.preclose), to_sqlite_value(row.volume), to_sqlite_value(row.amount))
@@ -272,6 +370,13 @@ def upsert_queried_bar_span(
     先并再写：不并的话一次调用留一行，一年下来几百行；并了之后常驻的是互不相接的几段，
     通常每合约一两行。区间是**闭**的，故首尾相接的两段（`2024-12-31` 与 `2025-01-01`）
     也算同一段——它们之间的每一天都被问过。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_code: Baostock 格式证券代码。
+        frequency: 分钟频率。
+        start_day: 本次问成功的区间起点 'YYYY-MM-DD'（含）。
+        end_day: 本次问成功的区间终点 'YYYY-MM-DD'（含）。
     """
     existing_rows = connection.execute(
         "SELECT StartDay, EndDay FROM QueriedBarSpans WHERE Code = ? AND Frequency = ?",
@@ -296,7 +401,14 @@ def upsert_queried_bar_span(
 
 
 def merge_day_spans(day_spans: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """把重叠或首尾相接的日区间并成互不相接的几段（按起点升序）。"""
+    """把重叠或首尾相接的日区间并成互不相接的几段（按起点升序）。
+
+    Args:
+        day_spans: 日区间列表，每段为 (起点, 终点)，闭区间。
+
+    Returns:
+        合并后的区间列表，按起点升序。
+    """
     merged: list[list[str]] = []
 
     for span_start, span_end in sorted(day_spans):
@@ -311,7 +423,15 @@ def merge_day_spans(day_spans: list[tuple[str, str]]) -> list[tuple[str, str]]:
 
 
 def _spans_are_contiguous(next_start: str, current_end: str) -> bool:
-    """下一段是否接着当前段：重叠，或正好从当前段的次日开始。"""
+    """下一段是否接着当前段：重叠，或正好从当前段的次日开始。
+
+    Args:
+        next_start: 下一段的起点 'YYYY-MM-DD'。
+        current_end: 当前段的终点 'YYYY-MM-DD'。
+
+    Returns:
+        True 表示两段可并为一段。
+    """
     return (
         date.fromisoformat(next_start).toordinal()
         <= date.fromisoformat(current_end).toordinal() + DAY_SPAN_ADJACENCY_DAYS
@@ -329,6 +449,19 @@ def ingest_stock(
 
     账在**两路查询都成功之后**才记：`query_minute_bars` / `query_daily_bars` 在上游失败时都会
     抛，抛了就写到账这一步；能记上就说明这一段的答案是上游给的，而不是我们被中断后猜的。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_code: Baostock 格式证券代码。
+        frequency: 分钟频率。
+        start_date: 起始日期 'YYYY-MM-DD'（含）。
+        end_date: 结束日期 'YYYY-MM-DD'（含）。
+
+    Returns:
+        有分钟数据的交易日列表，'YYYY-MM-DD' 升序。
+
+    Raises:
+        RuntimeError: 分钟或日线查询失败、分页中断（此时不入库、不记账）。
     """
     minute_frame = query_minute_bars(stock_code, start_date, end_date, frequency)
     daily_frame = query_daily_bars(stock_code, start_date, end_date)
@@ -341,7 +474,16 @@ def ingest_stock(
 
 
 def get_last_trading_day(connection: sqlite3.Connection, stock_code: str, frequency: str) -> str | None:
-    """库中该合约最后有分钟数据的交易日；无数据返回 None。"""
+    """库中该合约最后有分钟数据的交易日；无数据返回 None。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_code: Baostock 格式证券代码。
+        frequency: 分钟频率。
+
+    Returns:
+        最后交易日 'YYYY-MM-DD'；库中无该合约该频率的数据返回 None。
+    """
     row = connection.execute(
         "SELECT MAX(Time) FROM MinuteBars WHERE Code = ? AND Frequency = ?",
         (stock_code, frequency),
@@ -352,7 +494,18 @@ def get_last_trading_day(connection: sqlite3.Connection, stock_code: str, freque
 
 
 def load_minute_bars(connection: sqlite3.Connection, stock_code: str, frequency: str, start_day: str, end_day: str) -> pd.DataFrame:
-    """按交易日区间读回分钟 bar（列名对齐 BaoStock 原始帧，供 build_bar_frame 复用）。"""
+    """按交易日区间读回分钟 bar（列名对齐 BaoStock 原始帧，供 build_bar_frame 复用）。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_code: Baostock 格式证券代码。
+        frequency: 分钟频率。
+        start_day: 起始交易日 'YYYY-MM-DD'（含）。
+        end_day: 结束交易日 'YYYY-MM-DD'（含）。
+
+    Returns:
+        分钟帧，列名与 BaoStock 原始字段一致（date/time/open/…）。
+    """
     return pd.read_sql_query(
         "SELECT TradingDay AS date, Time AS time, Open AS open, High AS high, Low AS low, "
         "Close AS close, Volume AS volume, Amount AS amount "
@@ -362,7 +515,17 @@ def load_minute_bars(connection: sqlite3.Connection, stock_code: str, frequency:
 
 
 def load_trading_day_stats(connection: sqlite3.Connection, stock_code: str, start_day: str, end_day: str) -> pd.DataFrame:
-    """按交易日区间读回日度统计（索引对齐 query_daily_bars 输出）。"""
+    """按交易日区间读回日度统计（索引对齐 query_daily_bars 输出）。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_code: Baostock 格式证券代码。
+        start_day: 起始交易日 'YYYY-MM-DD'（含）。
+        end_day: 结束交易日 'YYYY-MM-DD'（含）。
+
+    Returns:
+        以 date 为索引的日度统计帧（preclose/volume/amount）。
+    """
     stats_frame = pd.read_sql_query(
         "SELECT TradingDay AS date, Preclose AS preclose, Volume AS volume, Amount AS amount "
         "FROM MinuteBarTradingDays WHERE Code = ? AND TradingDay >= ? AND TradingDay <= ? ORDER BY TradingDay",
@@ -383,7 +546,16 @@ def build_bar_frame(
 ) -> pd.DataFrame:
     """将单只股票的分钟线映射为 Bar Parquet 行（Volume/LastTraded 语义见 detect_cumulative_mode）。
 
-    返回 (bar_frame, mismatch_records)，后者为分钟量合计与日线量偏差 >1% 的交易日明细。
+    Args:
+        minute_frame: 该合约的分钟帧（load_minute_bars 输出）。
+        daily_frame: 该合约的日度统计帧（load_trading_day_stats 输出）。
+        exchange_id: 交易所代码 'SSE' / 'SZSE'。
+        instrument_id: 6 位证券代码。
+        preces: 写入 Preces 列的价格精度串，如 '5m'。
+
+    Returns:
+        (bar_frame, mismatch_records)：前者列序对齐 BAR_PARQUET_SCHEMA，
+        后者为分钟量合计与日线量偏差 >1% 的交易日明细。
     """
     rows: list[dict[str, Any]] = []
     mismatch_records: list[dict[str, Any]] = []
@@ -452,8 +624,23 @@ def build_bar_frame(
 
 
 def to_decimal_series(series: pd.Series) -> pd.Series:
-    """将 float/Decimal/None 混合列统一为 Decimal（pyarrow 的 float→decimal128 cast 不支持，需显式转换）。"""
+    """将 float/Decimal/None 混合列统一为 Decimal（pyarrow 的 float→decimal128 cast 不支持，需显式转换）。
+
+    Args:
+        series: 待转换的列。
+
+    Returns:
+        Decimal 列；None/NaN 保持 None，其余量化到 8 位小数。
+    """
     def convert(value: Any) -> Decimal | None:
+        """把单个值转为 8 位小数的 Decimal。
+
+        Args:
+            value: float / Decimal / None。
+
+        Returns:
+            Decimal；None 与 NaN 返回 None。
+        """
         if value is None or (isinstance(value, float) and pd.isna(value)):
             return None
         if isinstance(value, Decimal):
@@ -467,12 +654,27 @@ def to_decimal_series(series: pd.Series) -> pd.Series:
 
 
 def bar_file_path(output_root: str, exchange_id: str, period: str, frequency: str) -> str:
-    """三代文件共用命名：period 为 'YYYY'（年）/ 'YYYYMM'（月）/ 'YYYYMMDD'（日），频率作后缀。"""
+    """三代文件共用命名：period 为 'YYYY'（年）/ 'YYYYMM'（月）/ 'YYYYMMDD'（日），频率作后缀。
+
+    Args:
+        output_root: Parquet 输出根（绝对路径）。
+        exchange_id: 交易所代码 'SSE' / 'SZSE'。
+        period: 文件周期标识 'YYYY' / 'YYYYMM' / 'YYYYMMDD'。
+        frequency: 分钟频率，作文件名后缀。
+
+    Returns:
+        该文件的完整路径。
+    """
     return os.path.join(output_root, "Bar", f"Identity={exchange_id}.Stock", f"Year={period[:4]}", f"{period}_{frequency}m.parquet")
 
 
 def write_bar_file(parquet_file: str, bar_frame: pd.DataFrame) -> None:
-    """排序 + Decimal 化后按既有 schema 写单文件（纯数据库再导出，不做文件侧合并）。"""
+    """排序 + Decimal 化后按既有 schema 写单文件（纯数据库再导出，不做文件侧合并）。
+
+    Args:
+        parquet_file: 目标文件路径，父目录不存在时自动创建。
+        bar_frame: build_bar_frame 返回的 Bar 帧。
+    """
     ordered_frame = bar_frame.sort_values(["UpdateTs", "InstrumentID"]).reset_index(drop=True)
     for column in DECIMAL_COLUMNS:
         ordered_frame[column] = to_decimal_series(ordered_frame[column])
@@ -482,7 +684,11 @@ def write_bar_file(parquet_file: str, bar_frame: pd.DataFrame) -> None:
 
 
 def archive_file(file_path: str) -> None:
-    """将上一代文件移入同目录 archive/（重命名而非删除；回测 glob 不扫描 archive 层）。"""
+    """将上一代文件移入同目录 archive/（重命名而非删除；回测 glob 不扫描 archive 层）。
+
+    Args:
+        file_path: 待归档文件路径。
+    """
     archive_dir = os.path.join(os.path.dirname(file_path), "archive")
     os.makedirs(archive_dir, exist_ok=True)
     target_path = os.path.join(archive_dir, os.path.basename(file_path))
@@ -494,7 +700,12 @@ def archive_file(file_path: str) -> None:
 
 
 def archive_matching_files(directory: str, patterns: list[str]) -> None:
-    """将目录顶层匹配 glob 模式的文件归档（合并命令在写出新文件后调用）。"""
+    """将目录顶层匹配 glob 模式的文件归档（合并命令在写出新文件后调用）。
+
+    Args:
+        directory: 待扫描目录，只扫顶层不递归。
+        patterns: glob 模式列表；为空或目录不存在时直接返回。
+    """
     if not patterns or not os.path.isdir(directory):
         return
     for file_name in os.listdir(directory):
@@ -506,7 +717,14 @@ def archive_matching_files(directory: str, patterns: list[str]) -> None:
 
 
 def write_mismatch_report(target_file: str, period: str, frequency: str, mismatch_records: list[dict[str, Any]]) -> None:
-    """将分钟量与日线量偏差 >1% 的交易日明细写成同目录 CSV（正偏差 = 分钟多于日线），>5% 的天逐日告警。"""
+    """将分钟量与日线量偏差 >1% 的交易日明细写成同目录 CSV（正偏差 = 分钟多于日线），>5% 的天逐日告警。
+
+    Args:
+        target_file: 本次写出的 bar 文件路径，用于推出 CSV 的位置与命名。
+        period: 文件周期标识 'YYYY' / 'YYYYMM' / 'YYYYMMDD'。
+        frequency: 分钟频率。
+        mismatch_records: build_bar_frame 返回的偏差明细；为空则不写文件。
+    """
     for record in mismatch_records:
         if abs(record["DeviationPercent"]) > 5:
             logger.warning(f"{record['InstrumentID']} {record['TradingDay']} 分钟量与日量偏差 {record['DeviationPercent']}%，超过 5%")
@@ -528,6 +746,13 @@ def warn_coverage_shrink(
     """重写既有文件前检查覆盖收缩（仅告警不阻断）：
     1) 既有 span 超出本次导出区间——重写后文件范围变窄；
     2) 库中该频率在该区间完全没有既有文件两端的天数——重写将丢失库外天数。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        frequency: 分钟频率。
+        start_day: 本次导出区间起点 'YYYY-MM-DD'。
+        end_day: 本次导出区间终点 'YYYY-MM-DD'。
+        target_file: 即将被重写的文件路径；不存在时不检查。
     """
     if not os.path.exists(target_file):
         return
@@ -565,7 +790,19 @@ def export_bars_from_database(
     period: str,
     archive_patterns: list[str],
 ) -> None:
-    """从库导出 [start_day, end_day] 全部代码到 period 命名文件；写出后归档匹配的上一代文件。"""
+    """从库导出 [start_day, end_day] 全部代码到 period 命名文件；写出后归档匹配的上一代文件。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        output_root: Parquet 输出根（绝对路径）。
+        frequency: 分钟频率。
+        exchange_id: 交易所代码 'SSE' / 'SZSE'。
+        stock_codes: 该交易所下参与导出的证券代码列表。
+        start_day: 导出区间起点 'YYYY-MM-DD'（含）。
+        end_day: 导出区间终点 'YYYY-MM-DD'（含）。
+        period: 文件周期标识，决定文件名与 Year= 分区。
+        archive_patterns: 写出后需归档的 glob 模式；日度导出传空列表。
+    """
     frames: list[pd.DataFrame] = []
     mismatch_records: list[dict[str, Any]] = []
     for stock_code in stock_codes:
@@ -602,7 +839,17 @@ def run_update(
     default_start_date: str,
 ) -> None:
     """增量入库并按日写出 Parquet。续传起点为库中最后交易日本身（当日重拉自愈半截数据，
-    幂等由主键保证）；显式 --start 时对所有代码强制从该日起拉取。"""
+    幂等由主键保证）；显式 --start 时对所有代码强制从该日起拉取。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_codes: 参与更新的证券代码列表。
+        frequency: 分钟频率。
+        output_root: Parquet 输出根（绝对路径）。
+        start_date: 命令行 --start；为 None 时按库中最后交易日续传。
+        end_date: 结束日期 'YYYY-MM-DD'。
+        default_start_date: 库中无数据时的起始日期。
+    """
     codes_by_exchange = group_codes_by_exchange(stock_codes)
     trading_days_by_exchange: dict[str, set[str]] = {}
     for stock_code in stock_codes:
@@ -623,6 +870,11 @@ def run_update(
 
 
 def get_last_month() -> str:
+    """上一个自然月。
+
+    Returns:
+        上月标识 'YYYYMM'，如 '202609'。
+    """
     last_month_last_day = datetime.today().replace(day=1) - timedelta(days=1)
     return last_month_last_day.strftime("%Y%m")
 
@@ -634,7 +886,15 @@ def run_merge_month(
     output_root: str,
     month: str,
 ) -> None:
-    """整月导出为月度文件，归档该月全部日度文件。"""
+    """整月导出为月度文件，归档该月全部日度文件。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_codes: 参与合并的证券代码列表。
+        frequency: 分钟频率。
+        output_root: Parquet 输出根（绝对路径）。
+        month: 月份标识 'YYYYMM'。
+    """
     year = int(month[:4])
     month_number = int(month[4:6])
     period_start = f"{year}-{month_number:02d}-01"
@@ -655,7 +915,15 @@ def run_merge_year(
     output_root: str,
     year: str,
 ) -> None:
-    """整年导出为年度文件，归档该年全部月度文件与残留日度文件。"""
+    """整年导出为年度文件，归档该年全部月度文件与残留日度文件。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_codes: 参与合并的证券代码列表。
+        frequency: 分钟频率。
+        output_root: Parquet 输出根（绝对路径）。
+        year: 年份标识 'YYYY'。
+    """
     # '2024[0-9][0-9]_5m.parquet' 同时命中 6 位月度与 8 位日度文件（年份后必须跟数字，
     # 年度文件自身 '2024_5m.parquet' 不会命中）
     archive_patterns = [f"{year}[0-9][0-9]_{frequency}m.parquet"]
@@ -674,7 +942,16 @@ def run_backfill(
     start_date: str,
     end_date: str,
 ) -> None:
-    """区间入库并直接写出年度 Parquet（历史回补不产生日度文件）；仅触及回补区间相交的年份。"""
+    """区间入库并直接写出年度 Parquet（历史回补不产生日度文件）；仅触及回补区间相交的年份。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_codes: 参与回补的证券代码列表。
+        frequency: 分钟频率。
+        output_root: Parquet 输出根（绝对路径）。
+        start_date: 回补起始日期 'YYYY-MM-DD'。
+        end_date: 回补结束日期 'YYYY-MM-DD'。
+    """
     for stock_code in stock_codes:
         ingest_stock(connection, stock_code, frequency, start_date, end_date)
     for exchange_id, exchange_codes in group_codes_by_exchange(stock_codes).items():
@@ -695,10 +972,20 @@ def run_backfill(
 
 
 def parse_arguments() -> argparse.Namespace:
+    """解析命令行参数。
+
+    Returns:
+        含 command 及各子命令专属参数的 Namespace。
+    """
     parser = argparse.ArgumentParser(description="BaoStock 分钟线 → SQLite → QuantTrading Bar Parquet 管线")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def add_common_arguments(sub_parser: argparse.ArgumentParser) -> None:
+        """给子命令挂上四个共通参数（--config / --codes / --frequency / --output-root）。
+
+        Args:
+            sub_parser: 目标子命令的 ArgumentParser。
+        """
         sub_parser.add_argument("--config", default=CONFIG_FILE, help=f"配置文件路径，缺省 {CONFIG_FILE}（提供 stocks / default_start_date / parquet_output_root）")
         sub_parser.add_argument("--codes", default=None, help="逗号分隔的证券代码，缺省取配置文件 stocks")
         sub_parser.add_argument("--frequency", default=DEFAULT_FREQUENCY, choices=["5", "15", "30", "60"], help="分钟频率")
@@ -726,6 +1013,7 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> None:
+    """命令行入口：按子命令分派，并保证 Baostock 注销与数据库连接关闭。"""
     arguments = parse_arguments()
     config = load_config_file(arguments.config)
     stock_codes = arguments.codes.split(",") if arguments.codes else require_config_value(config, "stocks", arguments.config, "--codes")
