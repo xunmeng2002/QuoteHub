@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 # ---------- 配置 ----------
 
-CONFIG_FILE = "bao_stock_parquet.json"
+CONFIG_FILE = "config.json"
 CONFIG_KEY_OUTPUT_ROOT = "parquet_output_root"
 DEFAULT_FREQUENCY = "5"
 
@@ -884,7 +884,7 @@ def parse_arguments() -> argparse.Namespace:
         """
         sub_parser.add_argument(
             "--config", default=CONFIG_FILE,
-            help=f"配置文件路径，缺省 {CONFIG_FILE}（提供 stocks / default_start_date / parquet_output_root）",
+            help=f"配置文件路径，缺省 {CONFIG_FILE}（与 bao_stock.py 共用，含 stocks / default_start_date / parquet_output_root）",
         )
         sub_parser.add_argument("--codes", default=None, help="逗号分隔的证券代码，缺省取配置文件 stocks")
         sub_parser.add_argument("--frequency", default=DEFAULT_FREQUENCY, choices=["5", "15", "30", "60"], help="分钟频率")

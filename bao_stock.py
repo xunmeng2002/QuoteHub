@@ -43,7 +43,7 @@ import pandas as pd
 
 # ---------- 配置 ----------
 
-CONFIG_FILE = "bao_stock.json"
+CONFIG_FILE = "config.json"
 DB_PATH = "stock_data.db"
 LOG_LEVEL = logging.INFO
 LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
