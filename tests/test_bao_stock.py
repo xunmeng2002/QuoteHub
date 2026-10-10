@@ -4,17 +4,23 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 
 from datetime import date
 from pathlib import Path
 
 import pytest
 
+import bao_stock
+
 from bao_stock import (
+    SOCKET_TIMEOUT_SECONDS,
     _default_year_quarters,
     _quarter_window_start,
+    enable_socket_timeout,
     load_config,
     load_config_file,
+    logout_quietly,
     read_version,
     require_config_value,
 )
@@ -82,3 +88,22 @@ def test_quarter_window_start_is_first_day_of_earliest_quarter(quarters_back: in
     earliest_first_day = date(earliest_quarter_index * 3 // 12, earliest_quarter_index * 3 % 12 + 1, 1)
 
     assert _quarter_window_start(quarters_back) == earliest_first_day.isoformat()
+
+def test_enable_socket_timeout_sets_process_wide_default_timeout() -> None:
+    original_timeout = socket.getdefaulttimeout()
+
+    try:
+        socket.setdefaulttimeout(None)
+        enable_socket_timeout()
+
+        assert socket.getdefaulttimeout() == SOCKET_TIMEOUT_SECONDS
+    finally:
+        socket.setdefaulttimeout(original_timeout)
+
+def test_logout_quietly_swallows_logout_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def raise_network_error() -> None:
+        raise OSError("网络接收错误。")
+
+    monkeypatch.setattr(bao_stock.bs, "logout", raise_network_error)
+
+    logout_quietly()

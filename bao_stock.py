@@ -32,6 +32,7 @@ import contextlib
 import json
 import logging
 import os
+import socket
 import sqlite3
 import sys
 import threading
@@ -49,6 +50,7 @@ LOG_LEVEL = logging.INFO
 LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 MAX_LOGIN_RETRIES = 5
 RETRY_DELAY_SECONDS = 5
+SOCKET_TIMEOUT_SECONDS = 60
 
 # ---------- 版本 ----------
 
@@ -102,6 +104,34 @@ def login_with_retry(max_retries: int = MAX_LOGIN_RETRIES, delay: int = RETRY_DE
         if attempt < max_retries - 1:
             threading.Event().wait(delay)
     return None
+
+def enable_socket_timeout() -> None:
+    """给本进程后续建立的所有 socket 装上接收超时。
+
+    `baostock.util.socketutil.send_msg` 建 socket 时不设超时，且只在读到结尾分隔符
+    `<![CDATA[]]>` 时才退出收包循环。上游大响应降速或中途断流时（2026-10-10 实测
+    `query_all_stock` 约 130 KB，30 秒只到 40 KB 后停住），`recv` 会无限阻塞，进程表现为
+    CPU 归零、日志停在半截；此时按 Ctrl+C 也只是把阻塞搬进 `finally` 里的 `bs.logout()`，
+    看上去像“按了没反应”。这里把“永久挂死”换成“超时后报错”。
+
+    Note:
+        这是**每次 `recv`** 的超时，不是整包总时长——只有服务端连续停顿时长超过阈值才判失败，
+        正常但缓慢的传输不受影响，故阈值不宜取小。baostock 的 socket 在 `login` 时创建，
+        必须在首次登录之前调用本函数才会生效。
+    """
+    socket.setdefaulttimeout(SOCKET_TIMEOUT_SECONDS)
+
+def logout_quietly() -> None:
+    """注销 Baostock 会话；注销失败只记日志，不向上抛。
+
+    清理阶段本就不该盖掉真正的失败原因，而网络已降级时 `bs.logout()` 会走上与查询同一个
+    收包循环，反而是“看起来卡住”的来源。`KeyboardInterrupt` 不属 `Exception`，故第二次
+    Ctrl+C 仍能立即中断注销并退出。
+    """
+    try:
+        bs.logout()
+    except Exception as logout_error:
+        logger.warning("Baostock 注销失败（不影响已落库数据）: %s", logout_error)
 
 # ---------- 数据库初始化 ----------
 
@@ -1155,7 +1185,7 @@ def _run_update(task_func: Callable[[sqlite3.Connection], None]) -> None:
             task_func(connection)
             connection.commit()
         finally:
-            bs.logout()
+            logout_quietly()
 
 def update_all_extended(connection: sqlite3.Connection, config: JsonObject) -> None:
     """全量更新所有数据类别。
@@ -1324,13 +1354,14 @@ def update_all() -> None:
 
                 fetch_and_store_stock(connection, stock_code, start)
         finally:
-            bs.logout()
+            logout_quietly()
             logger.info("Baostock 注销")
 
 # ---------- 入口 ----------
 
 if __name__ == "__main__":
     logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
+    enable_socket_timeout()
 
     if "--version" in sys.argv:
         print(read_version())
@@ -1346,7 +1377,7 @@ if __name__ == "__main__":
                 try:
                     sync_securities(connection)
                 finally:
-                    bs.logout()
+                    logout_quietly()
     elif "--update-all" in sys.argv:
         config = load_config_file(CONFIG_FILE)
         _run_update(lambda conn: update_all_extended(conn, config))

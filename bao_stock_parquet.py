@@ -52,7 +52,18 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from bao_stock import DB_PATH, JsonObject, _collect_rows, init_database, load_config_file, login_with_retry, read_version, require_config_value
+from bao_stock import (
+    DB_PATH,
+    JsonObject,
+    _collect_rows,
+    enable_socket_timeout,
+    init_database,
+    load_config_file,
+    login_with_retry,
+    logout_quietly,
+    read_version,
+    require_config_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -916,6 +927,7 @@ def main() -> None:
     """命令行入口：按子命令分派，并保证 Baostock 注销与数据库连接关闭。"""
     arguments = parse_arguments()
     config = load_config_file(arguments.config)
+    enable_socket_timeout()
     stock_codes = arguments.codes.split(",") if arguments.codes else require_config_value(config, "stocks", arguments.config, "--codes")
     frequency = arguments.frequency
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -944,7 +956,7 @@ def main() -> None:
                              arguments.start, arguments.end or time.strftime("%Y-%m-%d"))
         finally:
             if logged_in:
-                bs.logout()
+                logout_quietly()
 
 if __name__ == "__main__":
     main()
