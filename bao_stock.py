@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """A股全量数据下载器（Baostock → SQLite）。
 
