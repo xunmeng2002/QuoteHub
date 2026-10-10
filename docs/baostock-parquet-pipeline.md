@@ -70,7 +70,7 @@ pip install baostock pandas pyarrow
 
 ## 3 子命令
 
-四个子命令共用参数：`--codes`（逗号分隔，缺省取配置 `stocks`）、`--frequency`（`5/15/30/60`，缺省 `5`）、`--output-root`、`--config`。
+四个子命令共用参数：`--codes`（逗号分隔，缺省取配置 `stocks`）、`--frequency`（`5/15/30/60`，缺省 `5`）、`--output-root`、`--config`。顶层另有 `--version`，打印组件版本号（读仓根 `version.txt` 的首个非空行）。
 
 ### 3.1 update —— 日常增量
 

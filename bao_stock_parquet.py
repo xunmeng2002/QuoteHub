@@ -52,7 +52,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from bao_stock import DB_PATH, JsonObject, _collect_rows, init_database, load_config_file, login_with_retry, require_config_value
+from bao_stock import DB_PATH, JsonObject, _collect_rows, init_database, load_config_file, login_with_retry, read_version, require_config_value
 
 logger = logging.getLogger(__name__)
 
@@ -875,6 +875,7 @@ def parse_arguments() -> argparse.Namespace:
         含 command 及各子命令专属参数的 Namespace。
     """
     parser = argparse.ArgumentParser(description="BaoStock 分钟线 → SQLite → QuantTrading Bar Parquet 管线")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {read_version()}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def add_common_arguments(sub_parser: argparse.ArgumentParser) -> None:

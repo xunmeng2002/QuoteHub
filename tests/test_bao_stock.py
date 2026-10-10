@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+
 from datetime import date
 from pathlib import Path
 
@@ -13,6 +15,7 @@ from bao_stock import (
     _quarter_window_start,
     load_config,
     load_config_file,
+    read_version,
     require_config_value,
 )
 
@@ -40,6 +43,9 @@ def test_require_config_value_names_config_file_and_cli_alternative() -> None:
     assert "parquet_output_root" in message
     assert "config.json" in message
     assert "--output-root" in message
+
+def test_read_version_returns_well_formed_semantic_version() -> None:
+    assert re.fullmatch(r"v[0-9]+[.][0-9]+[.][0-9]+", read_version())
 
 def test_load_config_file_exits_when_file_missing(tmp_path: Path) -> None:
     missing_config = tmp_path / "config.json"

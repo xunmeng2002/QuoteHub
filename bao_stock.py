@@ -50,6 +50,10 @@ LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 MAX_LOGIN_RETRIES = 5
 RETRY_DELAY_SECONDS = 5
 
+# ---------- 版本 ----------
+
+VERSION_FILE = "version.txt"
+
 logger = logging.getLogger(__name__)
 
 # ---------- 类型别名 ----------
@@ -1263,6 +1267,28 @@ def require_config_value(config: JsonObject, config_key: str, config_file: str, 
         raise SystemExit(f"配置缺少必填项 {config_key}（{config_file}）{alternatives}")
     return config_value
 
+def read_version() -> str:
+    """读取组件版本号。
+
+    `version.txt` 是版本号的唯一来源——若在每个源文件里各写一份字面量，改版时
+    就得逐个文件改，漏一个就出现两个版本号。口径与引擎的 `engine-version.txt`
+    一致：取首个非空行。
+
+    Returns:
+        版本号字符串，形如 `v1.0.0`。
+
+    Raises:
+        SystemExit: 版本文件缺失或为空。
+    """
+    version_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), VERSION_FILE)
+    if not os.path.exists(version_path):
+        raise SystemExit(f"版本文件不存在: {version_path}")
+    with open(version_path, "r", encoding="utf-8") as version_file:
+        for version_line in version_file:
+            if version_line.strip():
+                return version_line.strip()
+    raise SystemExit(f"版本文件为空: {version_path}")
+
 def update_all() -> None:
     """遍历配置中的股票代码，增量更新行情数据。"""
     config = load_config_file(CONFIG_FILE)
@@ -1306,7 +1332,9 @@ def update_all() -> None:
 if __name__ == "__main__":
     logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 
-    if "--update" in sys.argv:
+    if "--version" in sys.argv:
+        print(read_version())
+    elif "--update" in sys.argv:
         update_all()
     elif "--sync-securities" in sys.argv:
         with contextlib.closing(sqlite3.connect(DB_PATH)) as connection:

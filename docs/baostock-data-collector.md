@@ -50,6 +50,7 @@ python bao_stock.py [选项]        # 无参数打印用法
 - 此处**没有** `--config` 之类的选项：配置文件名固定在代码里（`CONFIG_FILE`），只能靠"在仓根运行"定位。
 - `default_start_date` 是库内无历史数据时的下载起点，**必填**：缺失即报错退出（`配置缺少必填项 default_start_date（config.json）`），不留代码兜底。
 - 建表自动完成：`init_database` 依次执行 `sql/schema/Create_v1.0.0.sql` 与 `sql/upgrades/` 下全部升级脚本。
+- `python bao_stock.py --version` 打印组件版本号；版本号的唯一来源是仓根的 `version.txt`（与引擎的 `engine-version.txt` 同口径），改版只改这一个文件。
 
 ## 4 命令详解
 
