@@ -5,6 +5,8 @@
 内部的 rootdir 推导。
 """
 
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 

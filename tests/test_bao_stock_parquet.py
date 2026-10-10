@@ -1,5 +1,7 @@
 """bao_stock_parquet.py 单元测试：纯函数（不碰数据库、网络与真实文件系统）。"""
 
+from __future__ import annotations
+
 import pytest
 
 from bao_stock_parquet import (

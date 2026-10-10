@@ -1,5 +1,7 @@
 """bao_stock.py 单元测试：配置守卫与季度窗口推算（纯函数，不碰数据库与网络）。"""
 
+from __future__ import annotations
+
 import json
 from datetime import date
 
