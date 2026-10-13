@@ -4,6 +4,16 @@
 
 ID 规则：`D`＝原 ✅ ／ `Q`＝原 ❓ ／ `R`＝原 🔄，编号取自 **2026-10-10 首次拆分当日**的文档顺序，此后永久稳定；新增条目在**首次归档时**按当时顺序续编。
 
+## D.11 版本化与发布物（v1.0.0）
+
+- 原日期：2026-10-10
+- 提交：`4fd1993`/`36b8ec0`/`82d06ce`/`6067d0d`/`c6143c6`
+
+原文：
+
+- **D.11** 2026-10-10：**版本化与发布物（v1.0.0）**——`36b8ec0` 把 `default_start_date` 由「必填」收窄为「仅 `update` 必填」，`4fd1993` 引入版本单一来源，本条补出发布物并收尾陈旧模块名。**① 配置按需取**：`bao_stock_parquet.py` 原先在 `main()` 顶部无条件要求 `default_start_date`，而该键只有 `update` 用得上；消费方平台的 `backfill --start/--end` 流程因此被逼着在配置里填一个根本用不到的键。守卫下移到 `if arguments.command == "update":` 分支，`backfill` / `merge-*` 现全程不读它。**判定依据**：「必填」只应约束真正读它的命令，否则等于把内部实现细节写进对外契约。**② 版本单一来源**：新增 `version.txt`（`v1.0.0`）与 `read_version()`（取首个非空行，缺失或为空即 `SystemExit`），口径对齐引擎的 `engine-version.txt`；两脚本各加 `--version`（`bao_stock.py` 走 `sys.argv` 判定，管线走 argparse 的 `action="version"`）。**不**在每个源文件里写版本字面量——改版时漏一个就出现两个版本号。**③ 发布物五件**：`requirements.txt`（四包精确 pin：`baostock==0.9.3` / `numpy==2.5.3` / `pandas==3.0.5` / `pyarrow==25.0.1`）、`requirements-dev.txt`（`-r requirements.txt` ＋ `pytest==9.1.1`）、`README.md`、`docs/baostock-component-contract.md`（一句话契约／自足前提／库结构／CLI／退出码／产物布局）、`CHANGELOG.md`（v1.0.0 破坏性改动清单）。**④ 陈旧模块名收尾**：`bao_stock_parquet.py:29`/`:30` 与 `docs/baostock-parquet-pipeline.md:69` 的 `BaoStock.DB_PATH`、`BaoStock.init_database` 改回 `bao_stock.*`，`sql/upgrades/Update_v2.1.0.sql:1` 的 `BaoStockParquet 管线` 改 `bao_stock_parquet 管线`。**搜法教训**：这三处残留在文档与注释里，按 `BaoStock\.py` 这类**带后缀**的模式搜不到，须按**裸模块名**再搜一遍才现形。**验证**：`python -m pytest -q` → **38 passed**；两脚本 `--version` 均输出 `v1.0.0`；`backfill` 在缺 `default_start_date` 时退出码 0、缺 `stocks` 仍 exit 1（临时目录内实测）；五个新文件与三个改动文件**逐字节**核对 CRLF=0，行长全部 ≤150。**未做**：`v1.0.0` 的 git tag 与 Gitee Release 尚未发布——属对外动作，等用户点头。
+  **代码审查（`code-reviewer`：0 严重 / 1 高 / 3 中 / 3 低 / 3 可选）后修掉四处事实错误**（含 1 处阻断项）：① **高——契约把 `backfill --end` 写成必填**：实测 `backfill_parser` 里 `--start required=True`、`--end default=None`（缺省今天），与同仓管线文档「`--end` 缺省今天」自相矛盾——消费方据契约认定必传、据 README 认定可省，两处打架。已改为「`--start` 必填；`--end` 可省（缺省今天），消费方应显式传」。② **中——「空库时记一条 warning」在 `backfill` 上不可达**：`run_backfill` 先查 `MinuteBars` 里存在的年份，无数据则循环体不执行、根本不调 `export_bars_from_database`，那条 warning 只在 `merge-*` 会打。已改为「既不告警也不报错，只是没有产出文件；仅 `merge-*` 会为此记 warning」。③ **中——`登录失败` 子串并非登录失败的专属标记**：`login_with_retry:101` 每次重试失败都往 stderr 打 `登录失败（尝试 n/m）`，首次失败、第二次成功时进程**以 0 正常退出而 stderr 已含该子串**；而本档记录消费方「只认这个子串」，仅按子串判定会把成功运行误判为失败。已在契约加**注意**段，明写「必须先看退出码，子串只用于给失败分类」。④ **中/低——README 配置表把 `stocks` 写成「每个命令」**：`bao_stock.py` 的 `--sync-securities` / `--update-trade-dates` / `--update-index` / `--update-industry` / `--update-macro` / `--version` 都不读配置，`--codes` 也只存在于管线。命令清单已移到表下正文并逐条列全（原表格单元格塞不下整份清单，且会顶破 150 行宽）。另改三处措辞：契约 §1「输出根一律显式给定」→「应始终显式传，不传回落本仓配置值」（与 `resolve_output_root` 的配置回落对齐）；CHANGELOG 登录失败条注明「本句仅指管线，`bao_stock.py` 是记 error 后 `return`、退出码 0」；`bao_stock_parquet.py:30` 那句易读成「只执行一个升级脚本」的括号改为「加载 `Create_v1.0.0.sql` 后依次执行 upgrades 下全部脚本」。**未采纳（留档）**：表格单元格 ≤40 字符（全仓既存倾向，且 rules §7 那条指单元格文本而非行宽）；`docs/BaoStockPythonAPI.md` 改 kebab-case（既存文件名，改它会连带动 README 引用）；`sql/schema/` 缺 `Create_v2.1.0/2.2.0/2.3.0.sql`（既存结构问题，本批未引入，已立为 ❓）。
+
 ## D.10 三键一律必填：删掉 default_start_date 的三处代码兜底
 
 - 原日期：2026-10-10
@@ -121,3 +131,12 @@ ID 规则：`D`＝原 ✅ ／ `Q`＝原 ❓ ／ `R`＝原 🔄，编号取自 **
 原文：
 
 - 是否需要把 Python 运行时也锁定为其他 LTS 版本（原基线 3.14.5，本机现为 3.14.7，且 3.14.7 已被本次重建沿用）。
+
+## Q.01 `sql/schema/` 缺 Create_v2.1.0 / 2.2.0 / 2.3.0 的缺档
+
+- 原日期：2026-10-10
+- 结论：2026-10-13 用户裁定——schema **收敛为单一 `Create_v1.0.0.sql`**（全量最终态），删除 `Create_v2.0.0.sql` 与 4 个 `Update_v*.sql`，「缺档」随合并消失。见 D.16。
+
+原文：
+
+- **Q.01** `sql/schema/` 只有 `Create_v1.0.0.sql` 与 `Create_v2.0.0.sql`，缺 `Create_v2.1.0` / `2.2.0` / `2.3.0.sql`；`rules/database-style.md` §6 要求每次发版**同时**更新 schema 与 upgrades（等价性：空库执行 `Create_v2.0.0` ＋ 依次 upgrades 即得最新）。本仓 `init_database` 走的是「`Create_v1.0.0` ＋ 依次 upgrades」，运行上不受影响，但按规范属缺档。是否补齐待定（补齐后 `init_database` 是否改走最新 Create 也需一并决定）。

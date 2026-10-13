@@ -53,7 +53,10 @@ pip install baostock pandas pyarrow
 | `parquet_output_root` | Parquet 输出根目录 | **无（必填）** |
 | `database_path` | SQLite 库位置 | **无（必填）** |
 
-> **注意**：`config.json` 由 `bao_stock.py` 与 `bao_stock_parquet.py` **共用一份**，`stocks` 全仓只此一处。两脚本共用同一个库（`database_path`），日线采集与分钟线导出读的是同一份清单，结构上不可能不一致。本管线导出写文件时"以交易所为单位整文件重写"，文件内容 = 本配置的清单全集；清单里没有的票，导出的 Parquet 里也不会有。改清单 = 改这一处。
+> **注意**：`config.json` 由 `bao_stock.py`、`bao_stock_parquet.py` 与 `init_database.py` **共用一份**，`stocks` 全仓只此一处。
+> 三个脚本共用同一个库（`database_path`），日线采集与分钟线导出读的是同一份清单，结构上不可能不一致。
+> 本管线导出写文件时"以交易所为单位整文件重写"，文件内容 = 本配置的清单全集；清单里没有的票，导出的 Parquet 里也不会有。
+> 改清单 = 改这一处。
 
 ```json
 {
@@ -68,7 +71,8 @@ pip install baostock pandas pyarrow
 
 > **注意**：`parquet_output_root` 与 `database_path` 都是**相对当前工作目录**解析的，不是相对配置文件。故仍须在 QuoteHub 仓根运行（见 2.2）。示例值 `../QuantTrading/MdBaoStock` 指向 QuantTrading 仓根下的 `MdBaoStock`，与隔壁仓 `BackTest.json` 的 `MdDataPath` 指向同一实体。
 
-建表由 `bao_stock.init_database` 自动完成（`sql/upgrades/Update_v2.1.0.sql`），首次连接即生效，无需手工执行 SQL。
+**建表不在本管线**：库须先由仓根 `init_database.py` 建好（`python init_database.py --create`；既有库改跑 `--upgrade` 认领）。
+本管线连库时只核对 `PRAGMA user_version` 版本戳与 schema 内全部 24 张表是否都在，未建库或版本不符即以**退出码 1** 报错退出，且发生在联网登录之前。
 
 ## 3 子命令
 

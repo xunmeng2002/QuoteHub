@@ -53,7 +53,8 @@ python bao_stock.py [选项]        # 无参数打印用法
   它只在**加载配置之后**才用到，故 `--version`、`--help` 与无参数这三种情形在加载之前就返回；其余情形（含未知选项）都会先读配置。
 - 此处**没有** `--config` 之类的选项：配置文件名固定在代码里（`CONFIG_FILE`），只能靠"在仓根运行"定位。
 - `default_start_date` 是库内无历史数据时的下载起点，**必填**：缺失即报错退出（`配置缺少必填项 default_start_date（config.json）`），不留代码兜底。
-- 建表自动完成：`init_database` 依次执行 `sql/schema/Create_v1.0.0.sql` 与 `sql/upgrades/` 下全部升级脚本。
+- **建表不在本脚本**：库须先由仓根 `init_database.py` 建好（`python init_database.py --create`；既有库改跑 `--upgrade` 认领）。
+  本脚本每次连库只核对 `PRAGMA user_version` 版本戳与 schema 内全部 24 张表是否都在，库未建好或版本不符即以**退出码 1** 报错退出，且发生在联网登录之前。
 - `python bao_stock.py --version` 打印组件版本号；版本号的唯一来源是仓根的 `version.txt`（与引擎的 `engine-version.txt` 同口径），改版只改这一个文件。
 
 ## 4 命令详解
@@ -83,12 +84,13 @@ python bao_stock.py [选项]        # 无参数打印用法
 1. **首次建库**：
 
 ```text
+python init_database.py --create
 python bao_stock.py --sync-securities
 python bao_stock.py --update-trade-dates
 python bao_stock.py --update-all
 ```
 
-交易日历先建，证券同步的"最近交易日"才有依据。
+`init_database.py` 建表与打戳，只跑这一次。交易日历先建，证券同步的"最近交易日"才有依据。
 
 2. **日常（每日收盘后）**：
 
@@ -124,4 +126,4 @@ python bao_stock_parquet.py update
 - **历史深度**：CLI 的财务只拉最近 4 个季度、分红只拉最近 4 年；要更早的历史需在代码里给 `update_financial_data` / `update_dividend_data` 传 `years` / `quarters` 参数（CLI 未暴露）。
 - **价格不复权**：`DailyRawPrices` 存原始价，除权日前后价格不连续；需要复权价时用 `AdjustFactors` 的前复权 / 后复权因子自行换算。
 - 分钟线（5/15/30/60 分钟）不在本脚本范围，走 `bao_stock_parquet.py`。
-- 两个脚本共用同一个库（`config.json` 的 `database_path`）：`bao_stock_parquet.py` 的建表升级脚本由同一 `init_database` 自动应用，互相不影响对方数据。
+- 三个脚本共用同一个库（`config.json` 的 `database_path`）：建表与升级只由 `init_database.py` 做，本脚本与 `bao_stock_parquet.py` 都只连不建，互相不影响对方数据。

@@ -8,13 +8,15 @@ BaoStock 行情采集组件：把证券宝（BaoStock）的日线、基本面与
 
 | 文件 | 职责 |
 | ---- | ---- |
+| `init_database.py` | 建库与升级，**本仓唯一执行 DDL 的入口** |
 | `bao_stock.py` | 日线、复权因子、财务、分红、行业、指数成分、宏观、交易日历 |
 | `bao_stock_parquet.py` | 分钟线入库，并导出日 / 月 / 年三代 Parquet |
-| `sql/` | 建表与升级脚本，由 `init_database` 自动应用 |
-| `config.json` | 两个脚本共用的配置 |
+| `sql/` | 建表与升级脚本，只由 `init_database.py` 执行 |
+| `config.json` | 三个脚本共用的配置 |
 | `version.txt` | 版本号的唯一来源 |
 
-两个脚本共用同一个 SQLite 库（`config.json` 的 `database_path`，缺省 `stock_data.db`）。
+三个脚本共用同一个 SQLite 库（`config.json` 的 `database_path`，缺省 `stock_data.db`）。
+采集与导出两个脚本**只连接、只增删改查，不建表、不迁移**；库未建好或版本不符时以退出码 1 报错，指向 `init_database.py`。
 
 ## 安装
 
@@ -39,14 +41,16 @@ pip install -r requirements.txt
 `bao_stock.py` 的 `--update` / `--update-all` / `--update-financials` / `--update-dividends` /
 `--update-reports`。`--codes` 只在管线上可用。`database_path` 则是每个连库命令都要读的——
 只有 `--version`、`--help` 与无参数这三种情形在加载配置之前就返回，其余（含未知选项）一律先读配置。
+`init_database.py` 的 `--create` / `--upgrade` 同样无条件读它。
 
 ## 快速开始
 
 **必须在仓根运行**——`config.json` 与它给出的 `database_path` 都是相对路径，换目录会另建一个空库。
 
-首次建库：
+首次建库（`init_database.py` 只跑这一次，之后库的升级也在它身上）：
 
 ```text
+python init_database.py --create
 python bao_stock.py --sync-securities
 python bao_stock.py --update-trade-dates
 python bao_stock.py --update-all
@@ -69,7 +73,7 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-用例只覆盖纯函数，不碰数据库与网络。
+用例只用临时库与纯函数，不碰仓内真实库，也不联网。
 
 ## 文档
 

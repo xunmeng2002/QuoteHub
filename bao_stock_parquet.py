@@ -11,7 +11,7 @@
 幂等性由 SQLite 主键承担：入库一律 INSERT OR REPLACE，重复拉取同一天只会有最后一条生效；
 Parquet 文件成为数据库的纯再导出（不做文件侧合并），从根上消除"掩码跨精度误删"问题。
 
-另有一张 `QueriedBarSpans`（v2.3.0）：按「代码 + 频率」记**已向上游问成功的日区间**，供调用方
+另有一张 `QueriedBarSpans`：按「代码 + 频率」记**已向上游问成功的日区间**，供调用方
 判断"这段还用不用再取"。它与 `MinuteBars` 是两件事：停牌日在 `MinuteBars` 里永远没有行，而在
 账里被记为"问过了、上游没有"，于是那个缺口不会被反复重取。
 
@@ -27,7 +27,7 @@ Parquet 文件成为数据库的纯再导出（不做文件侧合并），从根
     - 股票回测需在 QuantTrading 的 BackTest.json 中将 MdDataPath 指向 output_root，
       ExchangeID 用 SSE/SZSE，InstrumentID 用 6 位代码（如 600519）。
     - SQLite 路径取自配置键 database_path，须在 QuoteHub 目录下运行；
-      建表由 bao_stock.init_database 自动应用（加载 sql/schema/Create_v1.0.0.sql 后依次执行 sql/upgrades/ 下全部脚本）。
+      库须先由仓根的 init_database.py 建好（python init_database.py --create），本脚本不建表、只核对版本。
     - 配置键均**无代码兜底**，一律必填，缺任一即报错退出；但只在真正用到它的
       子命令上要求：database_path、parquet_output_root 与 stocks 每个子命令都要（后两者另有
       --output-root / --codes 命令行替代），default_start_date 仅 update 需要。
@@ -56,12 +56,12 @@ from bao_stock import (
     JsonObject,
     collect_rows_or_raise,
     enable_socket_timeout,
-    init_database,
     load_config_file,
     login_with_retry,
     logout_quietly,
     read_version,
     require_config_value,
+    verify_database_initialized,
 )
 
 logger = logging.getLogger(__name__)
@@ -275,7 +275,7 @@ def detect_cumulative_mode(bar_values: list[float], daily_total: float) -> bool:
 # ---------- SQLite 入库 / 读取（事实源） ----------
 
 def connect_database(config: JsonObject, config_file: str) -> sqlite3.Connection:
-    """打开数据库连接并确保 Schema 已就绪。
+    """打开数据库连接并核对库已初始化且版本相符。
 
     Args:
         config: 解析后的配置字典，须含 database_path 键。
@@ -283,9 +283,13 @@ def connect_database(config: JsonObject, config_file: str) -> sqlite3.Connection
 
     Returns:
         SQLite 连接；调用方须用 `contextlib.closing` 保证关闭。
+
+    Raises:
+        SystemExit: 配置缺 database_path 键，或库未初始化 / 版本不符（由
+            verify_database_initialized 以退出码 1 结束）。
     """
     connection = sqlite3.connect(require_config_value(config, "database_path", config_file))
-    init_database(connection)
+    verify_database_initialized(connection)
     return connection
 
 def upsert_minute_bars(connection: sqlite3.Connection, stock_code: str, frequency: str, minute_frame: pd.DataFrame) -> None:

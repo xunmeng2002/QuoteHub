@@ -6,6 +6,7 @@ import json
 import re
 import socket
 import sqlite3
+import zlib
 
 from collections.abc import Iterator
 from contextlib import closing
@@ -16,6 +17,7 @@ import pandas as pd
 import pytest
 
 import bao_stock
+import init_database
 
 from bao_stock import (
     BAOSTOCK_SESSION_LOST_ERROR_CODE,
@@ -89,22 +91,25 @@ class _PagedResultSet:
 
 @pytest.fixture
 def initialized_connection(tmp_path: Path) -> Iterator[sqlite3.Connection]:
-    """建好表的临时库连接，用例结束即关闭。"""
+    """建好表并打好版本戳的临时库连接，用例结束即关闭。"""
     with closing(sqlite3.connect(tmp_path / "test.db")) as connection:
-        bao_stock.init_database(connection)
+        init_database.create_schema(connection)
         yield connection
 
 @pytest.fixture
 def database_config(tmp_path: Path) -> bao_stock.JsonObject:
-    """指向临时库的配置字典。
+    """指向临时库的配置字典；库已建好并打好版本戳（`_run_update` 会先核对 schema）。
 
     `_run_update` 从参数接收配置、不再读 config.json，故这里直接给字典而不写文件——
     写文件等于测一条重构后不存在的代码路径。
     """
+    database_path = tmp_path / "stock_data.db"
+    with closing(sqlite3.connect(database_path)) as connection:
+        init_database.create_schema(connection)
     return {
         "stocks": ["sh.600000"],
         "default_start_date": "2000-01-01",
-        "database_path": str(tmp_path / "stock_data.db"),
+        "database_path": str(database_path),
     }
 
 def test_require_config_value_returns_configured_value() -> None:
@@ -367,6 +372,62 @@ def test_run_update_requires_database_path(monkeypatch: pytest.MonkeyPatch) -> N
         bao_stock._run_update(lambda connection: None, {"stocks": ["sh.600000"]})
 
     assert "database_path" in str(raised_error.value.code)
+
+def test_run_update_exits_before_login_when_database_not_initialized(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """库没建好就不该白登一次——校验顺序是「取路径 → 开库 → 校 schema → 登录」。"""
+    monkeypatch.setattr(bao_stock, "login_with_retry", lambda *args, **kwargs: pytest.fail("库未初始化不该走到登录"))
+
+    with pytest.raises(SystemExit) as raised_error:
+        bao_stock._run_update(lambda connection: None, {"database_path": str(tmp_path / "empty.db")})
+
+    assert "init_database.py --create" in str(raised_error.value.code)
+
+def test_schema_fingerprint_round_trips_through_pragma_user_version() -> None:
+    """CRC32 有一半取值 >= 2^31，而 PRAGMA user_version 是有符号 int32，超范围会被静默截成 0。"""
+    high_checksum_text = next(
+        candidate for candidate in (f"schema-{size}" for size in range(1, 64))
+        if zlib.crc32(candidate.encode("utf-8")) >= 2**31
+    )
+
+    stamp = bao_stock.schema_fingerprint(high_checksum_text)
+
+    assert stamp < 0, "超过 int32 正范围的 CRC 必须转成负数，否则写进 user_version 就变成 0"
+    with closing(sqlite3.connect(":memory:")) as connection:
+        connection.execute(f"PRAGMA user_version = {stamp}")
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == stamp
+
+def test_schema_fingerprint_ignores_line_ending_style() -> None:
+    """同一份脚本的 CRLF 与 LF 版本必须算出同一个戳，否则换种检出方式就判版本不符。"""
+    lf_script = "CREATE TABLE T (\n    Id TEXT\n);\n"
+
+    assert bao_stock.schema_fingerprint(lf_script.replace("\n", "\r\n")) == bao_stock.schema_fingerprint(lf_script)
+
+def test_verify_database_initialized_accepts_freshly_created_schema(initialized_connection: sqlite3.Connection) -> None:
+    bao_stock.verify_database_initialized(initialized_connection)
+
+def test_verify_database_initialized_exits_on_uninitialized_database() -> None:
+    with closing(sqlite3.connect(":memory:")) as connection:
+        with pytest.raises(SystemExit) as exit_info:
+            bao_stock.verify_database_initialized(connection)
+
+    assert "init_database.py --create" in str(exit_info.value)
+
+def test_verify_database_initialized_exits_when_stamp_differs(initialized_connection: sqlite3.Connection) -> None:
+    initialized_connection.execute("PRAGMA user_version = 12345")
+
+    with pytest.raises(SystemExit) as exit_info:
+        bao_stock.verify_database_initialized(initialized_connection)
+
+    assert "init_database.py --upgrade" in str(exit_info.value)
+
+def test_verify_database_initialized_exits_when_table_missing(initialized_connection: sqlite3.Connection) -> None:
+    """戳只是建库脚本的指纹，删了表它不会变，故表存在性必须另查一遍。"""
+    initialized_connection.execute("DROP TABLE QueriedBarSpans")
+
+    with pytest.raises(SystemExit) as exit_info:
+        bao_stock.verify_database_initialized(initialized_connection)
+
+    assert "QueriedBarSpans" in str(exit_info.value)
 
 def test_update_industry_keeps_own_update_date_and_survives_second_run(
     initialized_connection: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch

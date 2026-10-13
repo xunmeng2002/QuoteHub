@@ -14,6 +14,9 @@
 
 库文件由本仓 `config.json` 的 `database_path` 给定，缺省值即仓根 `stock_data.db`。消费方以**只读**方式打开。
 
+> **消费前置**：库须先由维护侧在仓根跑 `python init_database.py --create` 建好（既有库改跑 `--upgrade` 认领）。
+> 组件**不建表、不迁移**，库未建好或版本不符时以退出码非 0 报错，stderr 指向该脚本。这是本次唯一需消费方同步的部署动作。
+
 > **注意**：消费方按自己的库文件名设定（示例平台为 `QUOTE_HUB_DATABASE_FILENAME`）打开文件，本仓按 `database_path` 写文件，
 > **两者须指同一个文件**。默认值下两侧都是 `stock_data.db`，契约本身不变；改任一侧都要同步改另一侧，否则消费方会安静地打开另一个（空）库。
 
@@ -21,11 +24,13 @@
 
 ### 2.1 必需的表与列
 
-| 表 | 必需列 | 由哪个 schema 版本建 |
-| ---- | ---- | ---- |
-| `Securities` | `Code`, `CodeName`, `StockType`, `Exchange`, `CurrentTradeStatus` | v1.0.0 |
-| `TradeDates` | `CalendarDate`, `IsTradingDay` | v2.0.0 |
-| `MinuteBars` | `Code`, `Frequency`, `TradingDay` | v2.1.0 |
+三张表全部由 `sql/schema/Create_v1.0.0.sql` 建出——本仓 schema 是**单文件全量基线**，不再有版本递进。
+
+| 表 | 必需列 |
+| ---- | ---- |
+| `Securities` | `Code`, `CodeName`, `StockType`, `Exchange`, `CurrentTradeStatus` |
+| `TradeDates` | `CalendarDate`, `IsTradingDay` |
+| `MinuteBars` | `Code`, `Frequency`, `TradingDay` |
 
 ### 2.2 可选表
 
@@ -38,6 +43,13 @@
 ### 2.3 表结构漂移
 
 必需表缺失、或必需列不齐，消费方一律显式报错，**不**当成"没数据"。故本仓升级 schema 时必须同步通知消费方。
+
+本仓建库时把 `Create_v1.0.0.sql` 内容的 CRC32（行尾归一为 LF 后计算，有符号 int32）写进 `PRAGMA user_version`，**0 表示未打戳**。
+每次连库都以**精确相等**核对它，不用"大于等于"——列序是契约，库比代码要求的更新、多一列，照样静默错位；同时核对 schema 内全部 24 张表是否都在。
+不符即以退出码非 0 报错，stderr 指向 `init_database.py --create` / `--upgrade`。
+
+故改动 `Create_v1.0.0.sql`（哪怕只改注释）即改戳，既有库须重跑 `python init_database.py --upgrade` 重新打戳。
+这是本仓改 schema 后消费方**唯一**需要留意的动作——组件自己不会补，也不会迁移。
 
 ## 3 界面二：命令行
 
@@ -65,10 +77,11 @@ python bao_stock_parquet.py backfill --start <YYYY-MM-DD> --end <YYYY-MM-DD> --f
 | 情形 | 表现 |
 | ---- | ---- |
 | 成功 | 退出码 0。**但 0 不代表有数据**——库中（或所请求区间）无数据时组件既不告警也不报错，只是没有产出文件；仅 `merge-*` 会为此记一条 warning |
+| schema 未初始化 / 不符 | 退出码非 0，且 **stderr 含子串 `init_database.py`**。**在联网登录之前就会退出**，故这一类的失败不消耗上游会话 |
 | 登录失败 | 退出码非 0，且 **stderr 含子串 `登录失败`**（原句为 `BaoStock 登录失败`）。**该子串不能单独用于判定**，见下方注意 |
 | 其它失败 | 退出码非 0，stderr 无 `登录失败` 标记 |
 
-除 `登录失败` 外，消费方不解析本组件的任何输出。
+除 `init_database.py` 与 `登录失败` 外，消费方不解析本组件的任何输出。
 
 > **注意**：`登录失败` **不是**登录失败的专属标记。`login_with_retry` 每次重试失败都会往 stderr 打一行
 > `登录失败（尝试 n/m）`，若首次失败、第二次成功，进程**以退出码 0 正常结束**而 stderr 已含该子串。

@@ -63,15 +63,26 @@
 
 ### 数据库
 
-- schema 累计到 v2.3.0：`MinuteBars` 自 v2.1.0、`QueriedBarSpans` 自 v2.3.0，由 `init_database` 在首次连接时自动应用，无需手工执行 SQL。
+- **应用不再建表、不再迁移**：`bao_stock.py` 与 `bao_stock_parquet.py` 启动只连接、只增删改查。
+  库未初始化或版本不符即以**退出码 1** 报错退出（且发生在联网登录之前），stderr 指向 `init_database.py`。
+  **依赖"组件首次连接时自动建表"的直调方与消费方会被打破**——部署流程须先跑 `python init_database.py --create`，这是本次唯一需跨仓同步的动作。
+- **删除公开导出符号 `bao_stock.init_database`**（连同代码侧那 10 行 `DROP TABLE PerformanceExpress` 迁移逻辑）；
+  按旧文档写过 `from bao_stock import init_database` 的代码会 ImportError。建库与升级改由**新增的仓根脚本 `init_database.py`** 承担
+  （`--create` 建新库、`--upgrade` 认领或升级既有库），它是本仓唯一执行 DDL 的入口。
+- **schema 收敛为单一 `sql/schema/Create_v1.0.0.sql`**（24 张表 + 2 个索引的全量最终态），删除 `Create_v2.0.0.sql`
+  与 `Update_v2.0.0.sql`~`Update_v2.3.0.sql` 共 5 个历史脚本。版本号由 v2.3.0 **回退**为 v1.0.0，与组件版本号对齐——发布前的版本切分对外没有含义；
+  `sql/upgrades/` 保留同样的升级机制，但只在**正式发布时**才新增脚本。
+- **新增版本戳**：建库时把 `Create_v1.0.0.sql` 内容的 CRC32（行尾归一为 LF 后计算，有符号 int32）写进 `PRAGMA user_version`，启动时**精确相等**比对，`0` 视为未打戳。
+  改动该 SQL 文件（哪怕只改注释）即改戳，既有库须重跑 `python init_database.py --upgrade` 重新打戳。
 
 ### 内部
 
 - `update_all` / `--sync-securities` 的「登录 → 中止转换 → 注销」编排收敛到 `_run_update` 一处（原先三份几乎相同的脚手架）。
 - `bao_stock.py` 入口的配置加载由每个命令分支各写一遍收敛为一个加载点；用法文案抽为 `_log_usage()`。
-- 新增回归用例：登录失败退出码、中止路径的注销与未提交回滚、上游 0 行不得清空日历 / 成分股 / 财务单键表 / 宏观表、回补当年写月度文件、缺 `database_path` 在登录之前报错、`connect_database` 按配置路径建库并落表。
+- 新增回归用例：登录失败退出码、中止路径的注销与未提交回滚、上游 0 行不得清空日历 / 成分股 / 财务单键表 / 宏观表、回补当年写月度文件、
+  缺 `database_path` 在登录之前报错、`connect_database` 按配置路径开库并拒绝未初始化的库、版本戳的 CRC32 有符号往返与换行归一。
 
 ### 新增
 
 - `version.txt`：版本号的唯一来源，`python bao_stock.py --version` 打印它。
-- `tests/`：pytest 用例，覆盖纯函数、结果集收集分支与临时 SQLite 落库回归（不碰网络、不碰真实库）。
+- `tests/`：pytest 用例，覆盖纯函数、结果集收集分支与临时 SQLite 落库回归（不碰网络、不碰仓内真实库）。

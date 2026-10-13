@@ -32,10 +32,12 @@ import contextlib
 import json
 import logging
 import os
+import re
 import socket
 import sqlite3
 import sys
 import threading
+import zlib
 from datetime import datetime, timedelta
 from typing import Any, Callable, Never
 
@@ -186,53 +188,102 @@ def logout_quietly() -> None:
     except Exception as logout_error:
         logger.warning("Baostock 注销失败（不影响已落库数据）: %s", logout_error)
 
-# ---------- 数据库初始化 ----------
+# ---------- 数据库版本核对 ----------
 
-def init_database(connection: sqlite3.Connection) -> None:
-    """初始化数据库：加载基础 Schema 后执行增量升级脚本，并迁移旧表结构。
+SCHEMA_SCRIPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "sql", "schema", "Create_v1.0.0.sql"
+)
+
+def read_schema_script() -> str:
+    """读取建库脚本全文。
+
+    本模块只读它（算版本戳、取表名），执行它的是仓根的 init_database.py——应用侧不建表。
+
+    Returns:
+        建库脚本全文。
+
+    Raises:
+        SystemExit: 建库脚本不存在——缺了它连期望版本都算不出来，只能立刻失败。
+    """
+    if not os.path.exists(SCHEMA_SCRIPT_PATH):
+        raise SystemExit(f"建库脚本不存在: {SCHEMA_SCRIPT_PATH}")
+    with open(SCHEMA_SCRIPT_PATH, "r", encoding="utf-8") as schema_file:
+        return schema_file.read()
+
+def schema_fingerprint(schema_text: str) -> int:
+    """建库脚本 → 版本戳：行尾归一后取 CRC32，再转有符号 int32。
+
+    `PRAGMA user_version` 是有符号 int32，超出范围的值会被 SQLite **静默截成 0**（2026-10-13 实测：
+    写入 2147483648 读回 0），而 CRC32 是无符号 32 位、约有一半取值 >= 2^31。不转有符号就会偶发
+    写入 0——应用侧判成"未初始化"，`--upgrade` 重写又是 0，陷入死循环。行尾归一是为了让 CRLF 与
+    LF 两种检出方式得到同一个戳（本仓现为 LF，但检出方式与编辑器都可能改它）。
+
+    Args:
+        schema_text: 建库脚本全文。
+
+    Returns:
+        有符号 32 位版本戳。
+    """
+    normalized_text = schema_text.replace("\r\n", "\n")
+    checksum = zlib.crc32(normalized_text.encode("utf-8"))
+    return checksum if checksum < 2**31 else checksum - 2**32
+
+def expected_schema_fingerprint() -> int:
+    """当前建库脚本算出的版本戳，即应用侧启动比对的期望值。
+
+    Returns:
+        有符号 32 位版本戳。
+    """
+    return schema_fingerprint(read_schema_script())
+
+def schema_table_names(schema_text: str) -> set[str]:
+    """从建库脚本提取表名——表清单不另维护一份，免得它随 schema 漂移。
+
+    锚定行首，免得注释里写到 `CREATE TABLE` 就被当成一张真表。
+
+    Args:
+        schema_text: 建库脚本全文。
+
+    Returns:
+        脚本中出现的表名集合。
+    """
+    return set(re.findall(r"^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[\"\[]?(\w+)", schema_text, re.IGNORECASE | re.MULTILINE))
+
+def existing_table_names(connection: sqlite3.Connection) -> list[str]:
+    """库内的业务表名（按名字排序），排除 SQLite 自身的 sqlite_* 表。
 
     Args:
         connection: 已打开的 SQLite 连接。
+
+    Returns:
+        表名列表。
     """
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    table_rows = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    ).fetchall()
+    return [table_row[0] for table_row in table_rows]
 
-    schema_dir = os.path.join(base_dir, "sql", "schema")
-    schema_path = os.path.join(schema_dir, "Create_v1.0.0.sql")
+def verify_database_initialized(connection: sqlite3.Connection) -> None:
+    """核对库已由 init_database.py 建好且版本相符；只读，不建表、不迁移。
 
-    if not os.path.exists(schema_path):
-        logger.error("Schema 文件不存在: %s", schema_path)
-        return
+    先比版本戳（精确相等，不用"大于等于"——多一列一样会让按列名取数错位），再核表存在性：
+    戳只是建库脚本的指纹，有人删过表它不会变，故两者都要。
 
-    with open(schema_path, "r", encoding="utf-8") as schema_file:
-        connection.executescript(schema_file.read())
-    logger.info("基础 Schema（v1.0.0）加载完成")
+    Args:
+        connection: 已打开的 SQLite 连接。
 
-    upgrades_dir = os.path.join(base_dir, "sql", "upgrades")
-    if os.path.isdir(upgrades_dir):
-        upgrade_files = sorted(
-            f for f in os.listdir(upgrades_dir) if f.endswith(".sql")
-        )
-        for upgrade_file in upgrade_files:
-            upgrade_path = os.path.join(upgrades_dir, upgrade_file)
-            with open(upgrade_path, "r", encoding="utf-8") as upgrade_file_handle:
-                connection.executescript(upgrade_file_handle.read())
-            logger.info("升级脚本 %s 执行完成", upgrade_file)
-
-    connection.commit()
-    logger.info("数据库 Schema 初始化完成")
-
-    # 3. 旧结构一次性迁移：PerformanceExpress 旧列为臆测口径（接口无对应字段，从未写入成功），
-    #    检测到旧列即重建；升级脚本每次全量重跑且 SQL 无条件 DDL，故迁移只能放在代码侧保证幂等。
-    express_columns = {row[1] for row in connection.execute("PRAGMA table_info(PerformanceExpress)")}
-    if express_columns and "TotalAsset" not in express_columns:
-        express_count = connection.execute("SELECT COUNT(*) FROM PerformanceExpress").fetchone()[0]
-        if express_count:
-            logger.warning("PerformanceExpress 为旧结构且含 %s 行数据，跳过自动迁移，请手工处理", express_count)
-        else:
-            connection.execute("DROP TABLE PerformanceExpress")
-            with open(os.path.join(upgrades_dir, "Update_v2.2.0.sql"), "r", encoding="utf-8") as migrate_file:
-                connection.executescript(migrate_file.read())
-            logger.info("PerformanceExpress 旧结构（空表）已重建为 v2.2.0 列定义")
+    Raises:
+        SystemExit: 库未初始化、版本不符或缺少表，均以退出码 1 结束并指向 init_database.py。
+    """
+    schema_text = read_schema_script()
+    stored_stamp = connection.execute("PRAGMA user_version").fetchone()[0]
+    if stored_stamp == 0:
+        raise SystemExit("数据库未初始化，请先执行 python init_database.py --create")
+    if stored_stamp != schema_fingerprint(schema_text):
+        raise SystemExit("数据库 schema 版本与当前代码不符，请执行 python init_database.py --upgrade")
+    missing_tables = sorted(schema_table_names(schema_text) - set(existing_table_names(connection)))
+    if missing_tables:
+        raise SystemExit(f"数据库缺少表 {', '.join(missing_tables)}，请执行 python init_database.py --upgrade 核对，必要时删除库文件后用 --create 重建")
 
 # ---------- 交易日推算 ----------
 
@@ -392,7 +443,7 @@ def sync_securities(connection: sqlite3.Connection) -> None:
     自动处理：新股 IPO → 插入，退市 → 标记，更名/停复牌 → 记录日志。
 
     Args:
-        connection: 已打开的 SQLite 连接（须已执行 init_database）。
+        connection: 已打开的 SQLite 连接（须已由 init_database.py 建好库）。
     """
     # 用最近一个交易日查询，避免当天盘中数据未就绪
     query_date = _get_previous_trading_date(connection) or datetime.today().strftime(
@@ -1192,13 +1243,13 @@ def _run_update(task_func: Callable[[sqlite3.Connection], None], config: JsonObj
         config: 解析后的配置字典，须含 database_path 键。
 
     Raises:
-        SystemExit: 配置缺 database_path 键、登录失败或任务被中止时以退出码 1 退出。登录失败
-            与任务中止同码是刻意的：调用方按退出码判成败，登录失败若以 0 收场，消费方会把
-            “什么都没做”当成“做完了”。
+        SystemExit: 配置缺 database_path 键、库未初始化（或版本不符）、登录失败或任务被中止时
+            以退出码 1 退出。登录失败与任务中止同码是刻意的：调用方按退出码判成败，登录失败若
+            以 0 收场，消费方会把“什么都没做”当成“做完了”。
     """
     database_path: str = require_config_value(config, "database_path", CONFIG_FILE)
     with contextlib.closing(sqlite3.connect(database_path)) as connection:
-        init_database(connection)
+        verify_database_initialized(connection)
         login_result = login_with_retry()
         if login_result is None:
             raise SystemExit("BaoStock 登录失败，操作取消")

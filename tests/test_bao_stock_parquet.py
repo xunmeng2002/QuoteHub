@@ -13,6 +13,7 @@ import pytest
 
 import bao_stock
 import bao_stock_parquet
+import init_database
 
 from bao_stock_parquet import (
     _spans_are_contiguous,
@@ -103,20 +104,29 @@ def test_detect_cumulative_mode_defaults_to_incremental(bar_values: list[float],
 
 @pytest.fixture
 def initialized_connection(tmp_path: Path) -> Iterator[sqlite3.Connection]:
-    """建好表的临时库连接，用例结束即关闭。"""
+    """建好表并打好版本戳的临时库连接，用例结束即关闭。"""
     with closing(sqlite3.connect(tmp_path / "test.db")) as connection:
-        bao_stock.init_database(connection)
+        init_database.create_schema(connection)
         yield connection
 
 def test_connect_database_opens_configured_path(tmp_path: Path) -> None:
-    """库路径取自配置键 database_path，且建表照旧由 init_database 自动应用。"""
+    """库路径取自配置键 database_path；库须已由 init_database.py 建好，管线只连不建。"""
     configured_path = tmp_path / "configured.db"
+    with closing(sqlite3.connect(configured_path)) as setup_connection:
+        init_database.create_schema(setup_connection)
 
     with closing(bao_stock_parquet.connect_database({"database_path": str(configured_path)}, "config.json")) as connection:
         stored_tables = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
 
     assert configured_path.exists()
     assert ("MinuteBars",) in stored_tables
+
+def test_connect_database_refuses_uninitialized_database(tmp_path: Path) -> None:
+    """应用侧不再建表：库未初始化即以退出码 1 报错，并指向 init_database.py。"""
+    with pytest.raises(SystemExit) as exit_info:
+        bao_stock_parquet.connect_database({"database_path": str(tmp_path / "empty.db")}, "config.json")
+
+    assert "init_database.py --create" in str(exit_info.value)
 
 def test_connect_database_names_the_config_file_it_was_given(tmp_path: Path) -> None:
     """错误提示须指向实际读的那个配置路径，而非常量 CONFIG_FILE——管线支持 --config。"""
