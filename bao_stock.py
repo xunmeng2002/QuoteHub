@@ -51,7 +51,7 @@ LOG_LEVEL = logging.INFO
 LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 MAX_LOGIN_RETRIES = 5
 RETRY_DELAY_SECONDS = 5
-SOCKET_TIMEOUT_SECONDS = 60
+SOCKET_TIMEOUT_SECONDS = 300
 
 # 服务端在会话失效后对任何查询都返回此码（客户端源码里没有「用户未登录」这句文案，只能是服务端发的）
 BAOSTOCK_SESSION_LOST_ERROR_CODE = "10001001"
