@@ -51,7 +51,7 @@
 
 - **Q.06** `v1.0.0` 与 `v1.0.1` 的 git tag 与 Gitee Release 都还没发（对外动作，等用户点头）。见归档 D.11。
 
-- **Q.08** 跨仓遗留：`QuantTrading/bin/Debug/BackTest.json` 仍是迁移前的 `D:\MdBaoStock`（源文件 `Configs/BackTest.json` 与 Release 那份均已改）。该文件是构建期拷贝、不在本仓，重新构建即自愈。见归档 D.02。
+- **Q.08** 跨仓遗留：`QuantTrading/bin/Debug/BackTest.json` 仍是迁移前的 `D:\MdBaoStock`（源文件 `Configs/BackTest.json` 与 Release 那份均已改）。该文件是构建期拷贝、不在本仓，重新构建即自愈。见归档 D.02。**2026-10-13 用户裁定**：只关注本仓，本项（属 QuantTrading 仓）**暂搁置**。
 
 - **Q.09** `backfill` 写**已结束年度**的年度文件时，不归档该年已有的月度文件（本命令刻意不动既有文件），该年若已由 `merge-month` 产出月度文件，年度与月度会被 `Year=*/*.parquet` 同时扫到。已在管线文档 §3.4、组件契约 §3.2 与 `run_backfill` docstring 写明「此时应改用 `merge-year`」；是否让 `backfill` 顺带归档待定。
 
@@ -73,4 +73,4 @@
 
 - `__pycache__/` 内仍留着改名前的 `BaoStock*.cpython-*.pyc`（旧模块名的孤儿产物；该目录已被 `.gitignore` 忽略，Python 不会再加载它们，无害）。如需清理，**逐个 `rm` 文件**而非递归删目录。
 
-- **消费方（`../QuantPlatform`）待同步的硬编码点**（2026-10-10 查明，用户已说明由其自行改造为配置文件，本仓未动）：① `backend/app/config.py:63` `QUOTE_HUB_CLI_FILENAME = "BaoStockParquet.py"` —— **陈旧入口名，是当前集成真正断掉的一处**，应改 `bao_stock_parquet.py`；② `backend/tests/quote_hub_stub.py:119` 摆的同名桩件把平台测试维持在全绿，**掩盖了①**——改真名时须同步改桩，否则改完仍测不出；③ `docs/acceptance-checklist.md:258` 与 `:298`（后者含 `from BaoStock import DB_PATH`）为文档引用——**该示例随 2026-10-13 本批删除 `DB_PATH` 而失效**，须改述为配置键 `database_path`；④ `backend/app/config.py:62` 的 `DEFAULT_QUOTE_HUB_ROOT = PLATFORM_ROOT.parent / "QuoteHub"` 与 `QUOTE_HUB_DATABASE_FILENAME = "stock_data.db"` 本身与本仓齐全，无需改。⑤ **`QUOTE_HUB_DATABASE_FILENAME` 与本仓配置键 `database_path` 是一对耦合**（2026-10-13 补）：两侧默认值同为 `stock_data.db`，本仓改 `database_path` 而平台不改那个常量，平台会安静地打开另一个（空）库；已写入契约 §2 注意段。**另须注意**：平台按**只读**方式开库（`?mode=ro`）、以 `cwd=本仓根` 调起命令行、且只认 stderr 里的 `登录失败` 一个子串——这三条已写入 `docs/baostock-component-contract.md`。⑥ **2026-10-13 新增**：平台若依赖组件自动建表，须在调起 `baostock_parquet.py` **之前**先跑 `python init_database.py --create`——库未建好或版本不符时组件以退出码 1 拒绝启动，不再自动补表（已写入契约 §2 消费前置）。
+- **消费方（`../QuantPlatform`）待同步的硬编码点**（2026-10-10 查明，用户已说明由其自行改造为配置文件，本仓未动）：① `backend/app/config.py:63` `QUOTE_HUB_CLI_FILENAME = "BaoStockParquet.py"` —— **陈旧入口名，是当前集成真正断掉的一处**，应改 `bao_stock_parquet.py`；② `backend/tests/quote_hub_stub.py:119` 摆的同名桩件把平台测试维持在全绿，**掩盖了①**——改真名时须同步改桩，否则改完仍测不出；③ `docs/acceptance-checklist.md:258` 与 `:298`（后者含 `from BaoStock import DB_PATH`）为文档引用——**该示例随 2026-10-13 本批删除 `DB_PATH` 而失效**，须改述为配置键 `database_path`；④ `backend/app/config.py:62` 的 `DEFAULT_QUOTE_HUB_ROOT = PLATFORM_ROOT.parent / "QuoteHub"` 与 `QUOTE_HUB_DATABASE_FILENAME = "stock_data.db"` 本身与本仓齐全，无需改。⑤ **`QUOTE_HUB_DATABASE_FILENAME` 与本仓配置键 `database_path` 是一对耦合**（2026-10-13 补）：两侧默认值同为 `stock_data.db`，本仓改 `database_path` 而平台不改那个常量，平台会安静地打开另一个（空）库；已写入契约 §2 注意段。**另须注意**：平台按**只读**方式开库（`?mode=ro`）、以 `cwd=本仓根` 调起命令行、且只认 stderr 里的 `登录失败` 一个子串——这三条已写入 `docs/baostock-component-contract.md`。⑥ **2026-10-13 新增**：平台若依赖组件自动建表，须在调起 `baostock_parquet.py` **之前**先跑 `python init_database.py --create`——库未建好或版本不符时组件以退出码 1 拒绝启动，不再自动补表（已写入契约 §2 消费前置）。**同日用户裁定**：QuantPlatform 后续将全面重构，本条**暂搁置**，本仓不再跟踪其落地。
