@@ -202,7 +202,7 @@ def query_minute_bars(stock_code: str, start_date: str, end_date: str, frequency
     Raises:
         RuntimeError: 查询失败或分页中断。
     """
-    result_set = bs.query_history_k_data_plus(
+    query_response = bs.query_history_k_data_plus(
         stock_code,
         MINUTE_K_FIELDS,
         start_date=start_date,
@@ -211,7 +211,7 @@ def query_minute_bars(stock_code: str, start_date: str, end_date: str, frequency
         adjustflag="3",
     )
     minute_frame = pd.DataFrame(
-        collect_rows_or_raise(result_set, f"{stock_code} 分钟K线"),
+        collect_rows_or_raise(query_response, f"{stock_code} 分钟K线"),
         columns=MINUTE_K_FIELDS.split(","),
     )
     for column in ("open", "high", "low", "close", "volume", "amount"):
@@ -236,7 +236,7 @@ def query_daily_bars(stock_code: str, start_date: str, end_date: str) -> pd.Data
     Raises:
         RuntimeError: 查询失败或分页中断。
     """
-    result_set = bs.query_history_k_data_plus(
+    query_response = bs.query_history_k_data_plus(
         stock_code,
         DAILY_K_FIELDS,
         start_date=start_date,
@@ -245,7 +245,7 @@ def query_daily_bars(stock_code: str, start_date: str, end_date: str) -> pd.Data
         adjustflag="3",
     )
     daily_frame = pd.DataFrame(
-        collect_rows_or_raise(result_set, f"{stock_code} 日线"),
+        collect_rows_or_raise(query_response, f"{stock_code} 日线"),
         columns=DAILY_K_FIELDS.split(","),
     )
     for column in ("preclose", "volume", "amount"):

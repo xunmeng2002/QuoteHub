@@ -196,21 +196,21 @@ def test_logout_quietly_swallows_logout_failure(monkeypatch: pytest.MonkeyPatch)
     logout_quietly()
 
 def test_collect_rows_or_raise_returns_rows_from_every_page() -> None:
-    result_set = _PagedResultSet([[["sh.600000"], ["sh.600004"]], [["sh.600006"]]], fields=["code"])
+    query_response = _PagedResultSet([[["sh.600000"], ["sh.600004"]], [["sh.600006"]]], fields=["code"])
 
-    assert collect_rows_or_raise(result_set, "全市场证券列表") == [["sh.600000"], ["sh.600004"], ["sh.600006"]]
+    assert collect_rows_or_raise(query_response, "全市场证券列表") == [["sh.600000"], ["sh.600004"], ["sh.600006"]]
 
 def test_collect_rows_or_raise_rejects_result_set_truncated_mid_pagination() -> None:
-    result_set = _PagedResultSet([[["row-1"]], [["row-2"]], [["row-3"]]], fields=["code"], failing_page_index=2)
+    query_response = _PagedResultSet([[["row-1"]], [["row-2"]], [["row-3"]]], fields=["code"], failing_page_index=2)
 
     with pytest.raises(BaostockPaginationInterruptedError) as raised_error:
-        collect_rows_or_raise(result_set, "行业分类")
+        collect_rows_or_raise(query_response, "行业分类")
 
     assert "行业分类" in str(raised_error.value)
     assert "已取 2 行" in str(raised_error.value)
 
 def test_collect_rows_or_raise_reports_lost_session() -> None:
-    result_set = _PagedResultSet(
+    query_response = _PagedResultSet(
         [[["row-1"]], [["row-2"]]],
         fields=["code"],
         failing_page_index=1,
@@ -219,7 +219,7 @@ def test_collect_rows_or_raise_reports_lost_session() -> None:
     )
 
     with pytest.raises(BaostockSessionLostError) as raised_error:
-        collect_rows_or_raise(result_set, "行业分类")
+        collect_rows_or_raise(query_response, "行业分类")
 
     assert BAOSTOCK_SESSION_LOST_ERROR_CODE in str(raised_error.value)
 

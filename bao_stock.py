@@ -83,7 +83,7 @@ class BaostockPaginationInterruptedError(BaostockUpdateAbortedError):
 
 # ---------- 工具函数 ----------
 
-def collect_rows_or_raise(result_set: Any, context_label: str) -> list[list[str]]:
+def collect_rows_or_raise(query_response: Any, context_label: str) -> list[list[str]]:
     """将 Baostock 结果集全部拉取为行列表；拉不全就抛异常。
 
     结果集接口把「这一页失败了」写进 `error_code` 而不抛异常，`next()` 只返回 False，
@@ -91,7 +91,7 @@ def collect_rows_or_raise(result_set: Any, context_label: str) -> list[list[str]
     全量行业分类，还记了一条成功日志。本函数把这种情况变成异常：宁可整轮中止，不留半份数据。
 
     Args:
-        result_set: Baostock 查询返回的结果集对象。
+        query_response: Baostock 查询返回的结果集对象。
         context_label: 出错信息里的业务上下文（证券代码、步骤名等）。
 
     Returns:
@@ -102,22 +102,22 @@ def collect_rows_or_raise(result_set: Any, context_label: str) -> list[list[str]
         BaostockSessionLostError: 服务端返回 10001001，会话已失效。
         BaostockPaginationInterruptedError: 其他错误码，行数与实际不符。
     """
-    if result_set is None:
+    if query_response is None:
         raise BaostockUpdateAbortedError(f"{context_label}: 查询未返回结果集")
 
     rows: list[list[str]] = []
-    while (result_set.error_code == "0") and result_set.next():
-        rows.append(result_set.get_row_data())
+    while (query_response.error_code == "0") and query_response.next():
+        rows.append(query_response.get_row_data())
 
-    error_code = result_set.error_code
+    error_code = query_response.error_code
     if error_code == BAOSTOCK_SESSION_LOST_ERROR_CODE:
         raise BaostockSessionLostError(
-            f"{context_label}: 会话已失效（{error_code} {result_set.error_msg}），已取 {len(rows)} 行；"
+            f"{context_label}: 会话已失效（{error_code} {query_response.error_msg}），已取 {len(rows)} 行；"
             "服务端此后对任何查询都会返回同一错误，重新登录后再跑"
         )
     if error_code != "0":
         raise BaostockPaginationInterruptedError(
-            f"{context_label}: 结果集读取中断（{error_code} {result_set.error_msg}），"
+            f"{context_label}: 结果集读取中断（{error_code} {query_response.error_msg}），"
             f"已取 {len(rows)} 行并不完整"
         )
     return rows
@@ -324,9 +324,9 @@ def _get_previous_trading_date(connection: sqlite3.Connection | None = None, loo
 
     start = (today - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
     end = yesterday.strftime("%Y-%m-%d")
-    result = bs.query_trade_dates(start_date=start, end_date=end)
+    query_response = bs.query_trade_dates(start_date=start, end_date=end)
 
-    rows = collect_rows_or_raise(result, "交易日历查询")
+    rows = collect_rows_or_raise(query_response, "交易日历查询")
     for row in reversed(rows):
         if len(row) >= 2 and row[1] == "1":  # is_trading_day == "1"
             return row[0]  # calendar_date
@@ -595,8 +595,8 @@ def _fetch_and_store_financial(connection: sqlite3.Connection, code: str, year: 
     Raises:
         BaostockUpdateAbortedError: 结果集拉取不完整（未返回结果集、分页中断或会话失效）。
     """
-    result = query_func(code, str(year), str(quarter))
-    rows = collect_rows_or_raise(result, f"{code} {table_name} {year}Q{quarter}")
+    query_response = query_func(code, str(year), str(quarter))
+    rows = collect_rows_or_raise(query_response, f"{code} {table_name} {year}Q{quarter}")
     if not rows:
         logger.info("%s %s %sQ%s 无数据，保留库内现有数据", code, table_name, year, quarter)
         return 0
@@ -606,7 +606,7 @@ def _fetch_and_store_financial(connection: sqlite3.Connection, code: str, year: 
         (code, year, quarter),
     )
 
-    frame = pd.DataFrame(rows, columns=result.fields)
+    frame = pd.DataFrame(rows, columns=query_response.fields)
     frame["Year"] = year
     frame["Quarter"] = quarter
     frame = frame.rename(
@@ -773,8 +773,8 @@ def update_dividend_data(connection: sqlite3.Connection, stock_codes: list[str],
     for code in stock_codes:
         for year in years:
             for year_type in ("report", "operate"):
-                result = bs.query_dividend_data(code, str(year), year_type)
-                rows = collect_rows_or_raise(result, f"{code} 除权除息 {year}/{year_type}")
+                query_response = bs.query_dividend_data(code, str(year), year_type)
+                rows = collect_rows_or_raise(query_response, f"{code} 除权除息 {year}/{year_type}")
                 if not rows:
                     continue
 
@@ -782,7 +782,7 @@ def update_dividend_data(connection: sqlite3.Connection, stock_codes: list[str],
                     "DELETE FROM DividendData WHERE Code=? AND Year=? AND YearType=?",
                     (code, year, year_type),
                 )
-                frame = pd.DataFrame(rows, columns=result.fields)
+                frame = pd.DataFrame(rows, columns=query_response.fields)
                 frame["Year"] = year
                 frame["YearType"] = year_type
                 frame = frame.rename(columns=column_map)
@@ -834,10 +834,10 @@ def update_performance_express(connection: sqlite3.Connection, stock_codes: list
     for code in stock_codes:
         # 接口按公告日期过滤，会返回 StatDate 早于窗口起点的行（如 8 月公告的中报快报）；
         # 删除范围需同时覆盖 PubDate，否则重跑触发主键冲突
-        result = bs.query_performance_express_report(
+        query_response = bs.query_performance_express_report(
             code, start_date=start_date, end_date=end_date
         )
-        rows = collect_rows_or_raise(result, f"{code} 业绩快报 {start_date}~{end_date}")
+        rows = collect_rows_or_raise(query_response, f"{code} 业绩快报 {start_date}~{end_date}")
         if not rows:
             continue
 
@@ -845,7 +845,7 @@ def update_performance_express(connection: sqlite3.Connection, stock_codes: list
             "DELETE FROM PerformanceExpress WHERE Code=? AND (PubDate>=? OR StatDate>=?)",
             (code, start_date, start_date),
         )
-        frame = pd.DataFrame(rows, columns=result.fields)
+        frame = pd.DataFrame(rows, columns=query_response.fields)
         frame = frame.rename(columns=column_map)
         frame["Year"] = frame["StatDate"].str[:4].astype(int)
         frame["Quarter"] = (frame["StatDate"].str[5:7].astype(int) - 1) // 3 + 1
@@ -893,10 +893,10 @@ def update_forecast_reports(connection: sqlite3.Connection, stock_codes: list[st
 
     for code in stock_codes:
         # 同业绩快报：接口按公告日期过滤，删除范围需同时覆盖 PubDate 保证重跑幂等
-        result = bs.query_forecast_report(
+        query_response = bs.query_forecast_report(
             code, start_date=start_date, end_date=end_date
         )
-        rows = collect_rows_or_raise(result, f"{code} 业绩预告 {start_date}~{end_date}")
+        rows = collect_rows_or_raise(query_response, f"{code} 业绩预告 {start_date}~{end_date}")
         if not rows:
             continue
 
@@ -904,7 +904,7 @@ def update_forecast_reports(connection: sqlite3.Connection, stock_codes: list[st
             "DELETE FROM ForecastReports WHERE Code=? AND (PubDate>=? OR StatDate>=?)",
             (code, start_date, start_date),
         )
-        frame = pd.DataFrame(rows, columns=result.fields)
+        frame = pd.DataFrame(rows, columns=query_response.fields)
         frame = frame.rename(columns=field_mapping)
         frame["Year"] = frame["StatDate"].str[:4].astype(int)
         frame["Quarter"] = (frame["StatDate"].str[5:7].astype(int) - 1) // 3 + 1
@@ -941,12 +941,12 @@ def update_index_constituents(connection: sqlite3.Connection) -> None:
     total = 0
 
     for index_code, query_func in indices:
-        result = query_func(query_date)
-        rows = collect_rows_or_raise(result, f"{index_code} 成分股 {query_date}")
+        query_response = query_func(query_date)
+        rows = collect_rows_or_raise(query_response, f"{index_code} 成分股 {query_date}")
         if not rows:
             logger.warning("%s 成分股 %s 上游返回 0 行，保留库内当日现有数据", index_code, query_date)
             continue
-        frame = pd.DataFrame(rows, columns=result.fields)
+        frame = pd.DataFrame(rows, columns=query_response.fields)
         frame["IndexCode"] = index_code
         frame = frame.rename(
             columns={"code": "Code", "code_name": "CodeName"}
@@ -977,13 +977,13 @@ def update_industry(connection: sqlite3.Connection) -> None:
     """
     today = datetime.today().strftime("%Y-%m-%d")
 
-    result = bs.query_stock_industry()
-    rows = collect_rows_or_raise(result, "行业分类")
+    query_response = bs.query_stock_industry()
+    rows = collect_rows_or_raise(query_response, "行业分类")
     if not rows:
         logger.info("行业分类无数据")
         return
 
-    frame = pd.DataFrame(rows, columns=result.fields)
+    frame = pd.DataFrame(rows, columns=query_response.fields)
 
     column_map = {
         "code": "Code",
@@ -1035,13 +1035,13 @@ def update_trade_dates(connection: sqlite3.Connection, start_date: str = "1990-1
     if end_date is None:
         end_date = datetime.today().strftime("%Y-%m-%d")
 
-    result = bs.query_trade_dates(start_date=start_date, end_date=end_date)
-    rows = collect_rows_or_raise(result, f"交易日历 {start_date}~{end_date}")
+    query_response = bs.query_trade_dates(start_date=start_date, end_date=end_date)
+    rows = collect_rows_or_raise(query_response, f"交易日历 {start_date}~{end_date}")
     if not rows:
         logger.warning("交易日历 %s~%s 上游返回 0 行，保留库内现有数据", start_date, end_date)
         return
 
-    frame = pd.DataFrame(rows, columns=result.fields)
+    frame = pd.DataFrame(rows, columns=query_response.fields)
     frame["is_trading_day"] = pd.to_numeric(frame["is_trading_day"], errors="coerce")
     frame = frame.rename(
         columns={
@@ -1065,14 +1065,14 @@ def update_deposit_rates(connection: sqlite3.Connection) -> None:
     Args:
         connection: 已打开的 SQLite 连接。
     """
-    result = bs.query_deposit_rate_data(start_date="2000-01-01")
-    rows = collect_rows_or_raise(result, "存款利率")
+    query_response = bs.query_deposit_rate_data(start_date="2000-01-01")
+    rows = collect_rows_or_raise(query_response, "存款利率")
     if not rows:
         logger.warning("存款利率上游返回 0 行，保留库内现有数据")
         return
 
     connection.execute("DELETE FROM DepositRates")
-    frame = pd.DataFrame(rows, columns=result.fields)
+    frame = pd.DataFrame(rows, columns=query_response.fields)
     frame = frame.rename(
         columns={
             "pubDate": "PubDate",
@@ -1106,14 +1106,14 @@ def update_loan_rates(connection: sqlite3.Connection) -> None:
     Args:
         connection: 已打开的 SQLite 连接。
     """
-    result = bs.query_loan_rate_data(start_date="2000-01-01")
-    rows = collect_rows_or_raise(result, "贷款利率")
+    query_response = bs.query_loan_rate_data(start_date="2000-01-01")
+    rows = collect_rows_or_raise(query_response, "贷款利率")
     if not rows:
         logger.warning("贷款利率上游返回 0 行，保留库内现有数据")
         return
 
     connection.execute("DELETE FROM LoanRates")
-    frame = pd.DataFrame(rows, columns=result.fields)
+    frame = pd.DataFrame(rows, columns=query_response.fields)
     frame = frame.rename(
         columns={
             "pubDate": "PubDate",
@@ -1143,14 +1143,14 @@ def update_reserve_ratios(connection: sqlite3.Connection) -> None:
     Args:
         connection: 已打开的 SQLite 连接。
     """
-    result = bs.query_required_reserve_ratio_data(start_date="2000-01-01")
-    rows = collect_rows_or_raise(result, "准备金率")
+    query_response = bs.query_required_reserve_ratio_data(start_date="2000-01-01")
+    rows = collect_rows_or_raise(query_response, "准备金率")
     if not rows:
         logger.warning("准备金率上游返回 0 行，保留库内现有数据")
         return
 
     connection.execute("DELETE FROM ReserveRatios")
-    frame = pd.DataFrame(rows, columns=result.fields)
+    frame = pd.DataFrame(rows, columns=query_response.fields)
     frame = frame.rename(
         columns={
             "pubDate": "PubDate",
@@ -1178,16 +1178,16 @@ def update_money_supply(connection: sqlite3.Connection) -> None:
         connection: 已打开的 SQLite 连接。
     """
     end_month = datetime.today().strftime("%Y-%m")
-    result = bs.query_money_supply_data_month(
+    query_response = bs.query_money_supply_data_month(
         start_date="2000-01", end_date=end_month
     )
-    rows = collect_rows_or_raise(result, "货币供应量")
+    rows = collect_rows_or_raise(query_response, "货币供应量")
     if not rows:
         logger.warning("货币供应量上游返回 0 行，保留库内现有数据")
         return
 
     connection.execute("DELETE FROM MoneySupply")
-    frame = pd.DataFrame(rows, columns=result.fields)
+    frame = pd.DataFrame(rows, columns=query_response.fields)
     frame = frame.rename(
         columns={
             "statYear": "StatYear",

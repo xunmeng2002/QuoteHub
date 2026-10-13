@@ -52,12 +52,12 @@ def test_group_codes_by_exchange_keeps_input_order_within_exchange() -> None:
     [(None, None), (float("nan"), None), (0, 0), (1.5, 1.5)],
 )
 def test_to_sqlite_value_maps_nan_to_none(value: object, expected: object) -> None:
-    result = to_sqlite_value(value)
+    converted_value = to_sqlite_value(value)
 
     if expected is None:
-        assert result is None
+        assert converted_value is None
     else:
-        assert result == expected
+        assert converted_value == expected
 
 def test_merge_day_spans_merges_adjacent_spans() -> None:
     merged = merge_day_spans([("2024-01-01", "2024-01-05"), ("2024-01-06", "2024-01-10")])

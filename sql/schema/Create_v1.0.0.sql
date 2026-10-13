@@ -343,7 +343,7 @@ CREATE TABLE IF NOT EXISTS MinuteBars (
     CONSTRAINT PkMinuteBars PRIMARY KEY (Code, Frequency, Time)
 );
 
-CREATE INDEX IF NOT EXISTS IX_MinuteBars_Frequency_TradingDay ON MinuteBars (Frequency, TradingDay);
+CREATE INDEX IF NOT EXISTS IdxMinuteBarsFrequencyTradingDay ON MinuteBars (Frequency, TradingDay);
 
 -- 分钟线覆盖交易日的日度统计：Preclose 供导出时回填当日首根 bar 的 PreClosePrice，
 -- Volume/Amount 供增量/累计口径判别与交叉校验。
@@ -356,7 +356,7 @@ CREATE TABLE IF NOT EXISTS MinuteBarTradingDays (
     CONSTRAINT PkMinuteBarTradingDays PRIMARY KEY (Code, TradingDay)
 );
 
-CREATE INDEX IF NOT EXISTS IX_MinuteBarTradingDays_TradingDay ON MinuteBarTradingDays (TradingDay);
+CREATE INDEX IF NOT EXISTS IdxMinuteBarTradingDaysTradingDay ON MinuteBarTradingDays (TradingDay);
 
 -- 已问过的日区间账：记「这一只合约、这一档频率，这一次向上游问成功了哪一段」，而不是
 -- 「哪几天真有 bar」。两者必须分开——上游对停牌日、未上市日根本不返回数据，只按 bar 记账的

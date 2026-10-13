@@ -71,3 +71,18 @@ def test_upgrade_schema_rewrites_stamp_when_structure_matches(tmp_path: Path) ->
         init_database.upgrade_schema(connection)
 
         assert connection.execute("PRAGMA user_version").fetchone()[0] == bao_stock.expected_schema_fingerprint()
+def test_every_index_in_the_script_follows_the_naming_rule(tmp_path: Path) -> None:
+    """索引名一律 Idx{表}{列} / Uidx{表}{列}（database-style.md §1），防止再退回 IX_ 之类。"""
+    database_path = tmp_path / "indexes.db"
+
+    with closing(sqlite3.connect(database_path)) as connection:
+        init_database.create_schema(connection)
+        index_names = [
+            index_row[1]
+            for table_name in bao_stock.existing_table_names(connection)
+            for index_row in connection.execute(f'PRAGMA index_list("{table_name}")')
+            if index_row[3] != "pk"
+        ]
+
+    assert index_names
+    assert all(index_name.startswith(("Idx", "Uidx")) for index_name in index_names)
