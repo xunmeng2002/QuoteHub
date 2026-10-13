@@ -4,6 +4,37 @@
 
 ID 规则：`D`＝原 ✅ ／ `Q`＝原 ❓ ／ `R`＝原 🔄，编号取自 **2026-10-10 首次拆分当日**的文档顺序，此后永久稳定；新增条目在**首次归档时**按当时顺序续编。
 
+## D.13 --update-all 的假成功与行业分类主键崩溃
+
+- 原日期：2026-10-10
+- 提交：`4de4779`
+
+原文：
+
+- **D.13** 2026-10-10：**`--update-all` 的假成功与行业分类主键崩溃一并修复**（用户裁定「严格收集 + 失效即中止」）。**两个独立缺陷**：
+  ① 16:43 那次全量更新 2/7 之后每步都打印「用户未登录」，却仍以 `===== 全量更新完成 =====` 收场、退出码 0——根因是 `_collect_rows` 的 while 条件是
+  `error_code == "0"`，分页中途失败只跳出循环、把已取到的行交出去（实测行业分类只拿到 2000 行当 5558 行的全量），调用方「查询失败就 return」的前置判断永远看不到这个错误。
+  ② 17:11 复跑抛 `UNIQUE constraint failed: IndustryClassification.Code, IndustryClassification.UpdateDate`——根因是接口字段 `updateDate` 与建表列 `UpdateDate`
+  在 SQLite 里是**同一列**（列名比较不区分大小写），且接口那个排在前、值覆盖我方的值（存进去的是 `2026-10-05`，DELETE 键却是当天），于是 DELETE 永不命中、重跑必撞主键；
+  `update_index_constituents` 同型（探针实测其字段同构）。
+  **改动**：① 删掉宽松的 `_collect_rows`，改为严格 `collect_rows_or_raise(result_set, context_label)` 与异常层级
+  `BaostockUpdateAbortedError(RuntimeError)` / `BaostockSessionLostError`（10001001 会话失效）/
+  `BaostockPaginationInterruptedError`，`None` 结果集同样中止；16 处调用点全部切换，连带删掉失效的「`error_code != 0` 就 return/continue」与两处「`result is None`」判断；
+  `bao_stock_parquet.py` 删掉自己那份同名函数、改为从 `bao_stock` 导入（其文档契约声明抛 RuntimeError，新基类即是）。② 新增 `_restrict_to_table_columns` 按建表列白名单裁帧，`update_industry` 与
+  `update_index_constituents` 各用一次（白名单与 `Update_v2.0.0.sql` 列定义一致）。③ 中止语义与提交粒度：`_run_update` / `--sync-securities` / `update_all()` 捕获中止异常 →
+  `_exit_on_update_aborted` 记两行日志并 `SystemExit(1)`；`update_all_extended` 改为每批、每只股票提交；`update_all()` 补上原先**完全缺失**的 `connection.commit()`——
+  `sqlite3` 关闭不提交即整轮回滚，`--update` 此前「下载完一行不落库」（实测复现：insert 后 close，重开 0 行）。
+  **验证**：`python -m pytest -q` → **51 passed**（新增 11 例：分页替身、两个异常分支、`None` 结果集、RuntimeError 契约、白名单裁列、退出码 1、
+  行业分类与指数成分各跑两遍的落库回归例、`_get_previous_trading_date` 中止例、`--update` 落库回归例）。
+  **真接口各跑两遍**（临时库，未碰 `stock_data.db`）：
+  行业分类两遍均成功、共 **5558** 行、`UpdateDate` 全为 `2026-10-10`、重复 Code 0；指数成分股两遍均成功、`hs300 300 + sz50 50 + zz500 500`、`UpdateDate` 全为查询基准日 `2026-10-09`。
+  **离线时序实测**（探针以桩代三步）：第 3 步抛会话失效 → 日志两行、退出码 1、**第 1/2 步落库保留**、第 3 步未提交部分 0 行。
+  **行为变化（须知）**：单只代码级查询失败此前「记 warning 后跳过」，现在一律中止整轮——探针实测「无数据」回落为 `err=0` + 0 行（非股票代码亦然），不会误杀。
+  **code-reviewer 两轮复审**（同日）：一轮改 4 处——`_fetch_and_store_financial` docstring 仍写「失败返回 0」、`bao_stock_parquet.py` 的两处
+  `error_code != "0"` 前置判断抢在异常分类之前抛错（会话失效退化成 `AttributeError`）、`update_all_extended` 的 Note 高估提交粒度、`SystemExit(1)` 缺异常链；
+  二轮改文档口径 1 处（把「第 4 步日 K」误写成「第 4、7 步」），并把测试改走 `closing` 与落库 fixture，去掉手写 `close()`。两轮均判无高风险项。
+  **未做**：`--update-all` 全量重跑（数十分钟起）；用户库中仍有 2000 行 `2026-10-05` 的陈旧行业分类，重跑前须先清（见备注）。
+
 ## D.12 网络层加接收超时，修 --update-all 挂死与 Ctrl+C 无效
 
 - 原日期：2026-10-10

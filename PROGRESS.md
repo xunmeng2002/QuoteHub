@@ -4,30 +4,6 @@
 ## ✅ 已完成
 
 
-- **D.13** 2026-10-10：**`--update-all` 的假成功与行业分类主键崩溃一并修复**（用户裁定「严格收集 + 失效即中止」）。**两个独立缺陷**：
-  ① 16:43 那次全量更新 2/7 之后每步都打印「用户未登录」，却仍以 `===== 全量更新完成 =====` 收场、退出码 0——根因是 `_collect_rows` 的 while 条件是
-  `error_code == "0"`，分页中途失败只跳出循环、把已取到的行交出去（实测行业分类只拿到 2000 行当 5558 行的全量），调用方「查询失败就 return」的前置判断永远看不到这个错误。
-  ② 17:11 复跑抛 `UNIQUE constraint failed: IndustryClassification.Code, IndustryClassification.UpdateDate`——根因是接口字段 `updateDate` 与建表列 `UpdateDate`
-  在 SQLite 里是**同一列**（列名比较不区分大小写），且接口那个排在前、值覆盖我方的值（存进去的是 `2026-10-05`，DELETE 键却是当天），于是 DELETE 永不命中、重跑必撞主键；
-  `update_index_constituents` 同型（探针实测其字段同构）。
-  **改动**：① 删掉宽松的 `_collect_rows`，改为严格 `collect_rows_or_raise(result_set, context_label)` 与异常层级
-  `BaostockUpdateAbortedError(RuntimeError)` / `BaostockSessionLostError`（10001001 会话失效）/
-  `BaostockPaginationInterruptedError`，`None` 结果集同样中止；16 处调用点全部切换，连带删掉失效的「`error_code != 0` 就 return/continue」与两处「`result is None`」判断；
-  `bao_stock_parquet.py` 删掉自己那份同名函数、改为从 `bao_stock` 导入（其文档契约声明抛 RuntimeError，新基类即是）。② 新增 `_restrict_to_table_columns` 按建表列白名单裁帧，`update_industry` 与
-  `update_index_constituents` 各用一次（白名单与 `Update_v2.0.0.sql` 列定义一致）。③ 中止语义与提交粒度：`_run_update` / `--sync-securities` / `update_all()` 捕获中止异常 →
-  `_exit_on_update_aborted` 记两行日志并 `SystemExit(1)`；`update_all_extended` 改为每批、每只股票提交；`update_all()` 补上原先**完全缺失**的 `connection.commit()`——
-  `sqlite3` 关闭不提交即整轮回滚，`--update` 此前「下载完一行不落库」（实测复现：insert 后 close，重开 0 行）。
-  **验证**：`python -m pytest -q` → **51 passed**（新增 11 例：分页替身、两个异常分支、`None` 结果集、RuntimeError 契约、白名单裁列、退出码 1、
-  行业分类与指数成分各跑两遍的落库回归例、`_get_previous_trading_date` 中止例、`--update` 落库回归例）。
-  **真接口各跑两遍**（临时库，未碰 `stock_data.db`）：
-  行业分类两遍均成功、共 **5558** 行、`UpdateDate` 全为 `2026-10-10`、重复 Code 0；指数成分股两遍均成功、`hs300 300 + sz50 50 + zz500 500`、`UpdateDate` 全为查询基准日 `2026-10-09`。
-  **离线时序实测**（探针以桩代三步）：第 3 步抛会话失效 → 日志两行、退出码 1、**第 1/2 步落库保留**、第 3 步未提交部分 0 行。
-  **行为变化（须知）**：单只代码级查询失败此前「记 warning 后跳过」，现在一律中止整轮——探针实测「无数据」回落为 `err=0` + 0 行（非股票代码亦然），不会误杀。
-  **code-reviewer 两轮复审**（同日）：一轮改 4 处——`_fetch_and_store_financial` docstring 仍写「失败返回 0」、`bao_stock_parquet.py` 的两处
-  `error_code != "0"` 前置判断抢在异常分类之前抛错（会话失效退化成 `AttributeError`）、`update_all_extended` 的 Note 高估提交粒度、`SystemExit(1)` 缺异常链；
-  二轮改文档口径 1 处（把「第 4 步日 K」误写成「第 4、7 步」），并把测试改走 `closing` 与落库 fixture，去掉手写 `close()`。两轮均判无高风险项。
-  **未做**：`--update-all` 全量重跑（数十分钟起）；用户库中仍有 2000 行 `2026-10-05` 的陈旧行业分类，重跑前须先清（见备注）。
-
 - **D.14** 2026-10-10：**回补当年改月度文件 ＋ 登录失败退出码 ＋ 先查后删 ＋ DRY 收敛 ＋ 口径差文档纠正**（用户裁定"四项全修"、PROGRESS 归档"现在就拆分"）。**① 当年年度文件重叠**：`backfill` 区间含**尚未结束的当年**时会写 `2026_5m.parquet`（一年一文件、覆盖整年），而之后 `update` 的日度文件、`merge-month` 的月度文件都会与它在同一天重叠；消费方回放 SQL（`QuantTrading/src/BackTest/MdReader.cpp`）按 `Year=*/*.parquet` 扫描且**不去重**（只 `ORDER BY UpdateTs`），同一天会被回放两次。改法：当年改走 `run_merge_month` 按月写出（`YYYYMM_5m.parquet`），当年不再写年度文件（留给次年 `merge-year`）；`merge-month` 的归档模式只认 8 位日度文件，动不了 4 位的年度文件，故重叠真会发生。**已落地的数据修整**：先逐月 `merge-month --month 202601…202610` 把当年物化为月度文件，再删掉那两份临时年度文件——删前已核对**键集完全等价**（`(InstrumentID, UpdateTs)` 无年度独有、无月度独有、无重复），删后逐 `Year=` 目录复核"行数 == 去重键数"。消费方按 `Year=*/*.parquet` 读到的行集不变，仅当年文件粒度由年改为月。**② 登录失败退出码**：`bao_stock.py` 的 `login_with_retry` 失败原本"记 error 后 return"，三处入口（`--update`/`--sync-securities`/`--update-all` 共用的 `_run_update`）以**退出码 0** 收场，与 v1.0.0 宣称的"按退出码判成败的消费方从此能真正看到失败"自相矛盾；改为 `raise SystemExit("BaoStock 登录失败，操作取消")`——退出码 1、stderr 仍含 `登录失败` 子串，消费方的失败分类依据不变。**③ 先删后查 → 先查后删**：`update_trade_dates` 与 `update_index_constituents` 原先先 `DELETE` 再查上游，上游 `err=0` 但返回 0 行时提前 return、`_run_update` 随后提交——等于把交易日历／当日成分股快照**清空却报成功**；改为查成功且有行才 `DELETE`，0 行只记 warning 并保留库内现有数据。**④ DRY**：三份几乎相同的「登录 → 中止转换 → 注销并回滚」脚手架收敛到 `_run_update(operation)` 一处，`update_all` 随之改为接收 `connection`。**⑤ 口径差纠正**：文档与代码注释里"约 0.4% 的固有口径差"实测不成立——分钟量合计与日线量在 2020–2022 与 2026 **逐日精确相等**（0.000%），仅 2023–2025 有部分交易日偏离 1%~7%（金额同步偏离），已按实测改写 `docs/baostock-parquet-pipeline.md` §6/§7、`docs/baostock-component-contract.md` §3.2 与代码注释。**验证**：新增回归用例（登录失败退出码非 0、中止路径注销且回滚未提交行、上游 0 行不得清空日历／成分股、回补当年写月度文件），`version.txt` 升 `v1.0.1`，`CHANGELOG.md` 增 v1.0.1 段。
 
 - **D.14 续（同一批未提交改动）2026-10-10：code-reviewer 审出四条，逐条核实后全部落地。****① 测试净损失（我自己造的，最重）**：上一轮把 `tests/test_bao_stock_parquet.py` **整份覆盖**，原文件 11 个用例（`split_stock_code` / `group_codes_by_exchange` / `to_sqlite_value` / `merge_day_spans` / `_spans_are_contiguous` / `bar_file_path` / `get_last_month` / `detect_cumulative_mode`）只剩 1 个，`pytest` 从 51 掉到 32 我却当成"数字记错了"——**记错的不是旧记录，是我漏看了掉幅**。已 `git show HEAD:tests/test_bao_stock_parquet.py` 取回全部原用例并与新用例合并，现 **58 passed**。**教训**：整份覆盖一个已有文件等于静默删除，改测试文件前先 `git diff --stat` 看掉幅。**② 「先查后删」只改了一半**：同类路径还有 8 处——财务单键表 4 处（`_fetch_and_store_financial` / `DividendData` / `PerformanceExpress` / `ForecastReports`，0 行时 `continue`/`return 0`）与四张宏观表（`DepositRates` / `LoanRates` / `ReserveRatios` / `MoneySupply`，0 行时整表已被 `DELETE`），全部按同一模式把 `DELETE` 移到"确认有行"之后、0 行记 warning 并保留库内数据；新增 2 个回归用例（财务单键 `BalanceData`、宏观 `DepositRates`）。**③ `run_backfill` 三处自造问题**：两条近乎相同的 `MinuteBars` 查询收敛为助手 `_query_backfilled_months`（DRY）；补 `if not stock_codes: return`（空清单会拼出 `Code IN ()` 非法 SQL）；注释「偏离 1%~7%」与文档「单日最大 7.3%」对齐。**④ 未采纳一条**：审查建议把登录失败也改成 `SystemExit(1)` ＋ `logger.error` 以求载荷类型一致——那会动到消费方正匹配的 stderr 子串（见 Q.02），不擅自改。**另记一条新未决**（Q.09）：`backfill` 写已结束年度的年度文件时不归档该年既有月度文件，本命令刻意不动既有文件，该情形应用 `merge-year`，已在两处文档与 docstring 写明。`python -m pytest -q` → **58 passed**。**提交**：`08b6133`（本条与续条一并）。
@@ -39,6 +15,8 @@
 
 - **D.17** 2026-10-13：**命名合规整改：索引名 `IX_*`→`Idx*`，Python 侧去 `result`／`result_set`**（用户裁定："命名问题检查一下，按照规范一起改了。"）。**结掉 Q.10**。**① SQL**：`sql/schema/Create_v1.0.0.sql` 两个索引改名——`IX_MinuteBars_Frequency_TradingDay`→`IdxMinuteBarsFrequencyTradingDay`、`IX_MinuteBarTradingDays_TradingDay`→`IdxMinuteBarTradingDaysTradingDay`，合 `rules/database-style.md` §1 的 `Idx{Table}{Column}`。**审计**：24 张表的 `CONSTRAINT Pk*`、表名与字段名另无违规——`ProfitData`／`PerformanceExpress` 一类以 `Data` 收尾的通名自带领域语义（是 BaoStock 数据集名），且是既有对外契约，不改。**② Python**：Harness §4 点名禁用的通用名 `result`／`result_set` 全仓清除——`bao_stock.py` 43 处、`bao_stock_parquet.py` 4 处、两个测试文件 9 处，统一改名为 `query_response`（持 Baostock 查询返回对象）与 `converted_value`（测试里 `to_sqlite_value` 的返回值）；`collect_rows_or_raise` 的**形参** `result_set` 属公开接口标识符，同样改名。纯改名，零行为变更。**③ 真库**：索引名进了结构比对，只改 schema 会让存量库判不符——实测 `--upgrade` 先报「表 minutebars 的列或索引不符」并退出码 1，就地 `DROP INDEX`+`CREATE INDEX` 重命名后 `--upgrade` 通过（不动任何数据）。**④ 版本戳**：schema 内容一变戳即变，`stock_data.db` 的 `user_version` 由 `-189891536` 改为 `-1368474405`（＝新期望值），`verify_database_initialized` 通过。**验证**：`pytest` **75 passed**（新增一例锁住索引命名：建库产出的非主键索引名一律 `Idx`／`Uidx` 开头）。**提交**：`980c219`。
 
+- **D.18** 2026-10-13：**首次成功建库 ＋ 全量下载**（用户实跑，本仓无代码改动）。**半关闭 Q.03**。流程：`python init_database.py --create`（24 表）→ `python bao_stock.py --update-trade-dates` → `python bao_stock.py --update-all`。**首跑撞上上游瞬时故障**：`--update-trade-dates` 第一次报 `10002007 网络接收错误`，`collect_rows_or_raise` 判定分页中断后中止并回滚（库未脏）——这是 D.13「截断即中止」保护首次在真实故障上生效。复测同一条全量查询 17.5 s 拿到 13083 行，属上游抖动，重跑即成功。当时那几行**裸输出**（`timed out` / `接收数据异常，请稍后再试。` / `list index out of range`）出自 baostock 库自身 `util/socketutil.py:88-91` 的 `print(ex)`，**不是本仓代码**——本仓错误一律带 `时间-级别-` 前缀或完整 traceback。**落库核验**：24 表中 18 张非空——`TradeDates` 13083（1990-12-19~2026-10-13，交易日 8740）、`Securities` 7425、`IndustryClassification` 5558（全为 `UpdateDate=2026-10-13`，早先那批 2026-10-05 陈旧行随重建消失）、`IndexConstituents` 850、三只配置票各 1639 条日 K（2020-01-02~2026-10-12）、宏观 4 类齐。空表 6 张：`MinuteBars` 组＝分钟线管线未跑；`NameChangeLogs`／`TradeStatusLogs` 记的是**变更**、首建为空属正常；`ForecastReports` 0 行**已向上游核实**——三只大盘蓝筹近 4 季度本就无预告（放宽到 2024 起仅 `sh.600519` 有 1 条），非漏采。**遗留**：本次只跑 3 只配置票，换成全市场 `stocks` 后的耗时与可靠性未验；分钟线全量（`bao_stock_parquet.py backfill`）未跑。**提交**：无。
+
 ## 🔄 进行中
 
 - 无。
@@ -47,7 +25,7 @@
 
 - **Q.02** `login_with_retry`（`bao_stock.py:101`）重试失败时的 warning 与致命错误**共用 `登录失败` 子串**，消费方若只认子串会把「首次失败、二次成功」的 0 退出误判为失败。契约已写明「必须先看退出码」，但**根治**是改文案（如「登录尝试失败」）让该子串唯一——属**消费方可见的诊断措辞变更**（平台的 `LOGIN_FAILURE_STDERR_MARKER` 正匹配该串），是否改由用户定。
 
-- **Q.03** `python bao_stock.py --update-all` 仍没跑过整轮（全量拉取数十分钟起、且会写库）。**注**：2026-10-10 已用真接口逐项验过登录与取数（行业分类 5558 行、指数成分股 850 行），`--update` 落库也已由测试桩验过；但「七步连着跑一遍」与「`--update` 真接口跑一遍」尚未实测。
+- **Q.03**（**半关闭**）`--update-all` 七步连着跑一遍**已于 2026-10-13 首次实测成功**（见 D.18）；仍未实测的是**日常 `--update` 的真接口跑一遍**（该命令落库已由测试桩验过）。
 
 - **Q.06** `v1.0.0` 与 `v1.0.1` 的 git tag 与 Gitee Release 都还没发（对外动作，等用户点头）。见归档 D.11。
 
@@ -63,7 +41,7 @@
 
 - **版本号口径**（2026-10-13 裁定）：**正式发布前不新起版本号**，改动一律累积进当前未发布版本（现为 `v1.0.0`，`version.txt` 与 `CHANGELOG.md` 同口径），到发布时才落定版本号并打 tag。`git tag -l` 目前为空——`v1.0.0` 的 tag 与 Gitee Release 仍未发（对外动作，等用户点头，见 Q.06）。
 
-- 归档层已按 §9.1 **建立**（2026-10-10，用户裁定「现在就拆分并建索引/归档文件」）：`PROGRESS-index.md` 存检索索引、`PROGRESS-archive.md` 存已关闭条目原文；✅ 区滚到 **D.13–D.17 共 5 批**（D.12 随本轮入档），Q.01／Q.04／Q.07／Q.10 了结入档、Q.05 删除。**ID 规则**：`D`＝原 ✅ ／ `Q`＝原 ❓ ／ `R`＝原 🔄，编号取自 **2026-10-10 首次拆分当日**的文档顺序，此后永久稳定（删除后不复用）；新增条目在首次归档时续编；`D` 系列在前、`Q` 系列随后，各自 ID 倒序。`PROGRESS.md` 现约 **33.1 KiB**（1024 口径，与既有条目一致）、索引 3.4 KiB、归档 38.3 KiB（后两者不计入 50 KiB 目标）。
+- 归档层已按 §9.1 **建立**（2026-10-10，用户裁定「现在就拆分并建索引/归档文件」）：`PROGRESS-index.md` 存检索索引、`PROGRESS-archive.md` 存已关闭条目原文；✅ 区滚到 **D.14–D.18 共 5 批**（D.13 随本轮入档），Q.01／Q.04／Q.07／Q.10 了结入档、Q.05 删除；Q.03 半关闭（未决部分留主文件）。**ID 规则**：`D`＝原 ✅ ／ `Q`＝原 ❓ ／ `R`＝原 🔄，编号取自 **2026-10-10 首次拆分当日**的文档顺序，此后永久稳定（删除后不复用）；新增条目在首次归档时续编；`D` 系列在前、`Q` 系列随后，各自 ID 倒序。`PROGRESS.md` 现约 **33.1 KiB**（1024 口径，与既有条目一致）、索引 3.4 KiB、归档 38.3 KiB（后两者不计入 50 KiB 目标）。
 
 - **行宽口径 150**（2026-10-10 裁定）。`python-style.md` §3 把缩进/行宽/换行符一律划归项目根 `.editorconfig` 管，故 `rules` 文件里一度不重复声明行宽数值（**2026-10-10 修订**：用户随后要求把 cpp 的「函数签名换行」条搬进其余语言规范，故 `../AI` 侧现已各自写入 150 阈值／120 填充，见下方分叉条）。本仓那份原先**缺 `max_line_length`**，是隔壁六仓（QuantTrading / Mdb / Beacon / DbAdapters / Templates / Spark）里唯一掉队的——它们都声明 `max_line_length = 150` 并在头注释写明来处。已按兄弟仓模板补齐：`[*]` 补 `max_line_length = 150`、补头注释（「机械格式的唯一权威」＋ 150 的来处）与分节注释，并顺手补 `[*.sql] indent_size = 4`（本仓有 6 个 .sql 受控文件，此前无任何段覆盖，只能落编辑器默认值）。**口径来处**：`markdown-style.md` §12「纯文本 ≤ 150 字符」＋ `cpp-style.md` §3 的函数签名单行阈值 150（**该文件里的 120 是"超过阈值后换行、每行填充到接近 120"，是填充目标不是上限**，此前误当上限用）。**落地后现状**：代码文件 0 行超标（原 `bao_stock_parquet.py` 有 1 行 151 字符，已拆行），markdown 36 行超标未处理（见 ❓）。**2026-10-10 续**：`markdown-style.md` §5 代码块行宽 80→150 已统一（用户裁定「所有文字类型的行宽限制统一」，commit `96b765f`）；该文件 §7「单元格内容 ≤ 40 字符」是**单元格文本长度**、非行宽，未动。同轮把 `python-style.md` §3 签名换行口径与 cpp 对齐（120 填充／严禁垂直铺开，并把「函数参数列表」移出尾随逗号条以防自相矛盾，commit `465fc34`）；`wpf-style.md` 新增 §4「XAML 标记格式」（元素标签换行阈值 150，commit `0f25c4a`）——用户先判「wpf 暂不管」、随即改判「XAML 也要限 150」，故补上；`.xaml` 归该文件、`.xaml.cs` 的 C# 归 `csharp-style.md`。
 
