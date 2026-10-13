@@ -45,7 +45,6 @@ import pandas as pd
 # ---------- 配置 ----------
 
 CONFIG_FILE = "config.json"
-DB_PATH = "stock_data.db"
 LOG_LEVEL = logging.INFO
 LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 MAX_LOGIN_RETRIES = 5
@@ -1185,17 +1184,20 @@ def _exit_on_update_aborted(abort_error: BaostockUpdateAbortedError) -> Never:
     logger.error("已提交的批次保留在库中，未提交的部分已回滚；排除网络/会话问题后重跑即可")
     raise SystemExit(1) from abort_error
 
-def _run_update(task_func: Callable[[sqlite3.Connection], None]) -> None:
+def _run_update(task_func: Callable[[sqlite3.Connection], None], config: JsonObject) -> None:
     """登录 Baostock → 执行任务 → 注销的统一流程。
 
     Args:
         task_func: 接收 SQLite 连接的数据更新函数。
+        config: 解析后的配置字典，须含 database_path 键。
 
     Raises:
-        SystemExit: 登录失败或任务被中止时以退出码 1 退出。两者同码是刻意的：调用方按
-            退出码判成败，登录失败若以 0 收场，消费方会把“什么都没做”当成“做完了”。
+        SystemExit: 配置缺 database_path 键、登录失败或任务被中止时以退出码 1 退出。登录失败
+            与任务中止同码是刻意的：调用方按退出码判成败，登录失败若以 0 收场，消费方会把
+            “什么都没做”当成“做完了”。
     """
-    with contextlib.closing(sqlite3.connect(DB_PATH)) as connection:
+    database_path: str = require_config_value(config, "database_path", CONFIG_FILE)
+    with contextlib.closing(sqlite3.connect(database_path)) as connection:
         init_database(connection)
         login_result = login_with_retry()
         if login_result is None:
@@ -1392,72 +1394,76 @@ def update_all(connection: sqlite3.Connection, config: JsonObject) -> None:
 
 # ---------- 入口 ----------
 
+def _log_usage() -> None:
+    """打印命令行用法。未知选项与未给选项都走这里。"""
+    logger.info(
+        "用法: python bao_stock.py [选项]\n\n"
+        "选项:\n"
+        "  --update             增量更新日K行情\n"
+        "  --sync-securities    同步全市场证券列表\n"
+        "  --update-all         全量更新所有数据\n"
+        "  --update-financials  更新财务数据（6类指标）\n"
+        "  --update-dividends   更新除权除息信息\n"
+        "  --update-reports     更新业绩快报和业绩预告\n"
+        "  --update-index       更新指数成分股（沪深300/上证50/中证500）\n"
+        "  --update-industry    更新行业分类\n"
+        "  --update-trade-dates 更新交易日历\n"
+        "  --update-macro       更新宏观经济数据（4类）"
+    )
+
 if __name__ == "__main__":
     logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
     enable_socket_timeout()
 
     if "--version" in sys.argv:
         print(read_version())
-    elif "--update" in sys.argv:
-        config = load_config_file(CONFIG_FILE)
-        _run_update(lambda conn: update_all(conn, config))
-    elif "--sync-securities" in sys.argv:
-        _run_update(sync_securities)
-    elif "--update-all" in sys.argv:
-        config = load_config_file(CONFIG_FILE)
-        _run_update(lambda conn: update_all_extended(conn, config))
-    elif "--update-financials" in sys.argv:
-        config = load_config_file(CONFIG_FILE)
-        stock_codes = require_config_value(config, "stocks", CONFIG_FILE)
-        _run_update(lambda conn: update_financial_data(conn, stock_codes))
-    elif "--update-dividends" in sys.argv:
-        config = load_config_file(CONFIG_FILE)
-        stock_codes = require_config_value(config, "stocks", CONFIG_FILE)
-        _run_update(lambda conn: update_dividend_data(conn, stock_codes))
-    elif "--update-reports" in sys.argv:
-        config = load_config_file(CONFIG_FILE)
-        stock_codes = require_config_value(config, "stocks", CONFIG_FILE)
-        def _update_reports(conn: sqlite3.Connection) -> None:
-            """业绩快报与业绩预告的合并任务，供 _run_update 调用。
-
-            证券代码取自所在分支的闭包变量 stock_codes，不由本函数接收。
-
-            Args:
-                conn: 由 _run_update 打开并传入的 SQLite 连接。
-            """
-            update_performance_express(conn, stock_codes)
-            update_forecast_reports(conn, stock_codes)
-        _run_update(_update_reports)
-    elif "--update-index" in sys.argv:
-        _run_update(update_index_constituents)
-    elif "--update-industry" in sys.argv:
-        _run_update(update_industry)
-    elif "--update-trade-dates" in sys.argv:
-        _run_update(update_trade_dates)
-    elif "--update-macro" in sys.argv:
-        def _update_macro(conn: sqlite3.Connection) -> None:
-            """宏观经济 4 类数据的合并任务，供 _run_update 调用。
-
-            Args:
-                conn: 由 _run_update 打开并传入的 SQLite 连接。
-            """
-            update_deposit_rates(conn)
-            update_loan_rates(conn)
-            update_reserve_ratios(conn)
-            update_money_supply(conn)
-        _run_update(_update_macro)
+    elif len(sys.argv) == 1 or "--help" in sys.argv:
+        _log_usage()
     else:
-        logger.info(
-            "用法: python bao_stock.py [选项]\n\n"
-            "选项:\n"
-            "  --update             增量更新日K行情\n"
-            "  --sync-securities    同步全市场证券列表\n"
-            "  --update-all         全量更新所有数据\n"
-            "  --update-financials  更新财务数据（6类指标）\n"
-            "  --update-dividends   更新除权除息信息\n"
-            "  --update-reports     更新业绩快报和业绩预告\n"
-            "  --update-index       更新指数成分股（沪深300/上证50/中证500）\n"
-            "  --update-industry    更新行业分类\n"
-            "  --update-trade-dates 更新交易日历\n"
-            "  --update-macro       更新宏观经济数据（4类）"
-        )
+        config = load_config_file(CONFIG_FILE)
+
+        if "--update" in sys.argv:
+            _run_update(lambda conn: update_all(conn, config), config)
+        elif "--sync-securities" in sys.argv:
+            _run_update(sync_securities, config)
+        elif "--update-all" in sys.argv:
+            _run_update(lambda conn: update_all_extended(conn, config), config)
+        elif "--update-financials" in sys.argv:
+            stock_codes = require_config_value(config, "stocks", CONFIG_FILE)
+            _run_update(lambda conn: update_financial_data(conn, stock_codes), config)
+        elif "--update-dividends" in sys.argv:
+            stock_codes = require_config_value(config, "stocks", CONFIG_FILE)
+            _run_update(lambda conn: update_dividend_data(conn, stock_codes), config)
+        elif "--update-reports" in sys.argv:
+            stock_codes = require_config_value(config, "stocks", CONFIG_FILE)
+            def _update_reports(conn: sqlite3.Connection) -> None:
+                """业绩快报与业绩预告的合并任务，供 _run_update 调用。
+
+                证券代码取自所在分支的闭包变量 stock_codes，不由本函数接收。
+
+                Args:
+                    conn: 由 _run_update 打开并传入的 SQLite 连接。
+                """
+                update_performance_express(conn, stock_codes)
+                update_forecast_reports(conn, stock_codes)
+            _run_update(_update_reports, config)
+        elif "--update-index" in sys.argv:
+            _run_update(update_index_constituents, config)
+        elif "--update-industry" in sys.argv:
+            _run_update(update_industry, config)
+        elif "--update-trade-dates" in sys.argv:
+            _run_update(update_trade_dates, config)
+        elif "--update-macro" in sys.argv:
+            def _update_macro(conn: sqlite3.Connection) -> None:
+                """宏观经济 4 类数据的合并任务，供 _run_update 调用。
+
+                Args:
+                    conn: 由 _run_update 打开并传入的 SQLite 连接。
+                """
+                update_deposit_rates(conn)
+                update_loan_rates(conn)
+                update_reserve_ratios(conn)
+                update_money_supply(conn)
+            _run_update(_update_macro, config)
+        else:
+            _log_usage()

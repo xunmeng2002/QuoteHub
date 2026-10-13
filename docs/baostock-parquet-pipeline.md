@@ -18,7 +18,7 @@
 BaoStock（只读增量拉取）
         │
         ▼
-SQLite（stock_data.db，唯一事实源，主键 UPSERT 幂等）
+SQLite（database_path 指向的库，唯一事实源，主键 UPSERT 幂等）
         │
         ▼ 纯数据库再导出（不做文件侧合并）
 <output_root>/Bar/Identity=<EXCH>.Stock/Year=<YYYY>/
@@ -42,7 +42,7 @@ pip install baostock pandas pyarrow
 
 ### 2.2 运行目录
 
-> **注意**：必须在 `D:\Gitee\QuoteHub` 目录下运行。SQLite 路径是相对路径 `stock_data.db`，换目录运行会另建一个空库。
+> **注意**：必须在 `D:\Gitee\QuoteHub` 目录下运行。SQLite 路径由 `config.json` 的 `database_path` 给出、按相对路径解析（缺省 `stock_data.db`），换目录运行会另建一个空库。
 
 ### 2.3 配置文件（config.json）
 
@@ -51,20 +51,22 @@ pip install baostock pandas pyarrow
 | `stocks` | 证券代码列表，`sh.` / `sz.` 前缀 + 6 位代码 | 无（必填） |
 | `default_start_date` | 库中无数据时的默认回补起点 | 仅 `update` 必填；`merge-*` / `backfill` 不读它 |
 | `parquet_output_root` | Parquet 输出根目录 | **无（必填）** |
+| `database_path` | SQLite 库位置 | **无（必填）** |
 
-> **注意**：`config.json` 由 `bao_stock.py` 与 `bao_stock_parquet.py` **共用一份**，`stocks` 全仓只此一处。两脚本共用 `stock_data.db`，日线采集与分钟线导出读的是同一份清单，结构上不可能不一致。本管线导出写文件时"以交易所为单位整文件重写"，文件内容 = 本配置的清单全集；清单里没有的票，导出的 Parquet 里也不会有。改清单 = 改这一处。
+> **注意**：`config.json` 由 `bao_stock.py` 与 `bao_stock_parquet.py` **共用一份**，`stocks` 全仓只此一处。两脚本共用同一个库（`database_path`），日线采集与分钟线导出读的是同一份清单，结构上不可能不一致。本管线导出写文件时"以交易所为单位整文件重写"，文件内容 = 本配置的清单全集；清单里没有的票，导出的 Parquet 里也不会有。改清单 = 改这一处。
 
 ```json
 {
   "stocks": ["sh.600000", "sh.600519", "sz.000001"],
   "default_start_date": "2020-01-01",
-  "parquet_output_root": "../QuantTrading/MdBaoStock"
+  "parquet_output_root": "../QuantTrading/MdBaoStock",
+  "database_path": "stock_data.db"
 }
 ```
 
-> **注意**：本表的键**都没有代码兜底**，缺了即报错退出，不会回退到任何写死的默认值；但只在**真正用到它的子命令**上要求——`parquet_output_root` 与 `stocks` 每个子命令都要（可分别用 `--output-root` / `--codes` 替代），`default_start_date` 只有 `update` 要。以 `parquet_output_root` 为例——配置里不写、命令行也不传 `--output-root`，脚本会立即报错退出，不会回退到任何写死的路径。这是刻意的：有兜底时"配置漏写"与"配置写对"表现一致，路径会悄悄落到别处，本键当初被误当成硬编码正是这个原因。
+> **注意**：本表的键**都没有代码兜底**，缺了即报错退出，不会回退到任何写死的默认值；但只在**真正用到它的子命令**上要求——`database_path`、`parquet_output_root` 与 `stocks` 每个子命令都要（后两者可分别用 `--output-root` / `--codes` 替代），`default_start_date` 只有 `update` 要。以 `parquet_output_root` 为例——配置里不写、命令行也不传 `--output-root`，脚本会立即报错退出，不会回退到任何写死的路径。这是刻意的：有兜底时"配置漏写"与"配置写对"表现一致，路径会悄悄落到别处，本键当初被误当成硬编码正是这个原因。
 
-> **注意**：`parquet_output_root` 是**相对当前工作目录**解析的，不是相对配置文件。故仍须在 QuoteHub 仓根运行（见 2.2）。示例值 `../QuantTrading/MdBaoStock` 指向 QuantTrading 仓根下的 `MdBaoStock`，与隔壁仓 `BackTest.json` 的 `MdDataPath` 指向同一实体。
+> **注意**：`parquet_output_root` 与 `database_path` 都是**相对当前工作目录**解析的，不是相对配置文件。故仍须在 QuoteHub 仓根运行（见 2.2）。示例值 `../QuantTrading/MdBaoStock` 指向 QuantTrading 仓根下的 `MdBaoStock`，与隔壁仓 `BackTest.json` 的 `MdDataPath` 指向同一实体。
 
 建表由 `bao_stock.init_database` 自动完成（`sql/upgrades/Update_v2.1.0.sql`），首次连接即生效，无需手工执行 SQL。
 

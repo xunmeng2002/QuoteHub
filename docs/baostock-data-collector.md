@@ -1,6 +1,7 @@
 # bao_stock.py 基础数据采集使用说明
 
-`bao_stock.py` 是 QuoteHub 的基础数据采集脚本：证券列表、日 K 行情、复权因子、季频财务、除权除息、业绩报告、指数成分、行业分类、交易日历、宏观经济，全部落入 SQLite（`stock_data.db`）。分钟线落 Parquet 管线见 [baostock-parquet-pipeline.md](baostock-parquet-pipeline.md)。
+`bao_stock.py` 是 QuoteHub 的基础数据采集脚本：证券列表、日 K 行情、复权因子、季频财务、除权除息、业绩报告、指数成分、行业分类、交易日历、宏观经济，全部落入 SQLite（库位置见 `config.json` 的 `database_path`）。
+分钟线落 Parquet 管线见 [baostock-parquet-pipeline.md](baostock-parquet-pipeline.md)。
 
 ## 目录
 
@@ -45,8 +46,11 @@ python bao_stock.py [选项]        # 无参数打印用法
 
 ## 3 环境准备
 
-- 与管线脚本共用环境：在 `D:\Gitee\QuoteHub` 目录下运行（`stock_data.db` 与配置文件均为相对路径），依赖 `baostock`、`pandas`。
-- 本脚本与管线脚本 `bao_stock_parquet.py` **共用同一份** `config.json`（见管线文档 §2.3），`stocks` 全仓只此一处。其中的 `stocks` 是日 K / 财务 / 分红等按股票拉取命令的目标清单，**必填**：文件缺失、或键缺失/为空时脚本立即报错退出（`配置文件不存在: config.json` / `配置缺少必填项 stocks（config.json）`），不会静默跳过。与 `stocks` 无关的全市场级命令（`--update-index`、`--update-industry`、`--update-trade-dates`、`--update-macro`）不读配置，不受影响。
+- 与管线脚本共用环境：在 `D:\Gitee\QuoteHub` 目录下运行（`config.json` 与它给出的 `database_path` 均为相对路径），依赖 `baostock`、`pandas`。
+- 本脚本与管线脚本 `bao_stock_parquet.py` **共用同一份** `config.json`（见管线文档 §2.3），`stocks` 全仓只此一处。其中的 `stocks` 是日 K / 财务 / 分红等按股票拉取命令的目标清单，**必填**：
+  文件缺失、或键缺失/为空时脚本立即报错退出（`配置文件不存在: config.json` / `配置缺少必填项 stocks（config.json）`），不会静默跳过。
+- `database_path` 由每个连库命令读取（缺省 `stock_data.db`），**必填**、无兜底：缺键即 `配置缺少必填项 database_path（config.json）`。
+  它只在**加载配置之后**才用到，故 `--version`、`--help` 与无参数这三种情形在加载之前就返回；其余情形（含未知选项）都会先读配置。
 - 此处**没有** `--config` 之类的选项：配置文件名固定在代码里（`CONFIG_FILE`），只能靠"在仓根运行"定位。
 - `default_start_date` 是库内无历史数据时的下载起点，**必填**：缺失即报错退出（`配置缺少必填项 default_start_date（config.json）`），不留代码兜底。
 - 建表自动完成：`init_database` 依次执行 `sql/schema/Create_v1.0.0.sql` 与 `sql/upgrades/` 下全部升级脚本。
@@ -120,4 +124,4 @@ python bao_stock_parquet.py update
 - **历史深度**：CLI 的财务只拉最近 4 个季度、分红只拉最近 4 年；要更早的历史需在代码里给 `update_financial_data` / `update_dividend_data` 传 `years` / `quarters` 参数（CLI 未暴露）。
 - **价格不复权**：`DailyRawPrices` 存原始价，除权日前后价格不连续；需要复权价时用 `AdjustFactors` 的前复权 / 后复权因子自行换算。
 - 分钟线（5/15/30/60 分钟）不在本脚本范围，走 `bao_stock_parquet.py`。
-- 两个脚本共用同一 `stock_data.db`：`bao_stock_parquet.py` 的建表升级脚本由同一 `init_database` 自动应用，互相不影响对方数据。
+- 两个脚本共用同一个库（`config.json` 的 `database_path`）：`bao_stock_parquet.py` 的建表升级脚本由同一 `init_database` 自动应用，互相不影响对方数据。

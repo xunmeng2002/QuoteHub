@@ -94,6 +94,19 @@ def initialized_connection(tmp_path: Path) -> Iterator[sqlite3.Connection]:
         bao_stock.init_database(connection)
         yield connection
 
+@pytest.fixture
+def database_config(tmp_path: Path) -> bao_stock.JsonObject:
+    """指向临时库的配置字典。
+
+    `_run_update` 从参数接收配置、不再读 config.json，故这里直接给字典而不写文件——
+    写文件等于测一条重构后不存在的代码路径。
+    """
+    return {
+        "stocks": ["sh.600000"],
+        "default_start_date": "2000-01-01",
+        "database_path": str(tmp_path / "stock_data.db"),
+    }
+
 def test_require_config_value_returns_configured_value() -> None:
     config = {"stocks": ["sh.600519"]}
 
@@ -227,13 +240,11 @@ def test_restrict_to_table_columns_drops_interface_column_with_same_case_insensi
     assert list(restricted_frame.columns) == ["UpdateDate"]
     assert restricted_frame["UpdateDate"].tolist() == ["2026-10-10"]
 
-def test_update_all_commits_downloaded_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_update_all_commits_downloaded_rows(
+    database_config: bao_stock.JsonObject, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`--update` 原先整轮不提交：连接关闭即回滚，下载完一行不落库。"""
-    config_path = tmp_path / "config.json"
-    config_path.write_text(
-        json.dumps({"stocks": ["sh.600000"], "default_start_date": "2000-01-01"}), encoding="utf-8"
-    )
-    database_path = tmp_path / "stock_data.db"
+    database_path = Path(database_config["database_path"])
     downloaded_rows: list[tuple[str, str]] = []
 
     def store_downloaded_row(connection: sqlite3.Connection, stock_code: str, start_date: str) -> int:
@@ -246,16 +257,12 @@ def test_update_all_commits_downloaded_rows(tmp_path: Path, monkeypatch: pytest.
     class _SuccessfulLogin:
         error_code: str = "0"
 
-    monkeypatch.setattr(bao_stock, "CONFIG_FILE", str(config_path))
-    monkeypatch.setattr(bao_stock, "DB_PATH", str(database_path))
     monkeypatch.setattr(bao_stock, "login_with_retry", lambda *args, **kwargs: _SuccessfulLogin())
     monkeypatch.setattr(bao_stock, "sync_securities", lambda connection: None)
     monkeypatch.setattr(bao_stock, "fetch_and_store_stock", store_downloaded_row)
     monkeypatch.setattr(bao_stock, "logout_quietly", lambda: None)
 
-    bao_stock._run_update(
-        lambda connection: bao_stock.update_all(connection, bao_stock.load_config_file(bao_stock.CONFIG_FILE))
-    )
+    bao_stock._run_update(lambda connection: bao_stock.update_all(connection, database_config), database_config)
 
     with closing(sqlite3.connect(database_path)) as reopened_connection:
         stored_rows = reopened_connection.execute("SELECT Code, Date FROM DailyRawPrices").fetchall()
@@ -311,10 +318,10 @@ def test_update_index_constituents_keeps_snapshot_when_upstream_returns_no_rows(
     assert stored_rows == [("hs300", "sh.600000", "2026-10-09")]
 
 def test_run_update_logs_out_and_rolls_back_uncommitted_rows_when_aborted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    database_config: bao_stock.JsonObject, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """中止路径必须注销并丢掉未提交事务——「已提交的批次保留、未提交的回滚」是本次承诺的一部分。"""
-    database_path = tmp_path / "stock_data.db"
+    database_path = Path(database_config["database_path"])
     events: list[str] = []
 
     class _SuccessfulLogin:
@@ -327,12 +334,11 @@ def test_run_update_logs_out_and_rolls_back_uncommitted_rows_when_aborted(
         events.append("inserted_uncommitted")
         raise BaostockSessionLostError("用户未登录")
 
-    monkeypatch.setattr(bao_stock, "DB_PATH", str(database_path))
     monkeypatch.setattr(bao_stock, "login_with_retry", lambda *args, **kwargs: _SuccessfulLogin())
     monkeypatch.setattr(bao_stock, "logout_quietly", lambda: events.append("logout"))
 
     with pytest.raises(SystemExit) as raised_error:
-        bao_stock._run_update(insert_then_abort)
+        bao_stock._run_update(insert_then_abort, database_config)
 
     assert raised_error.value.code == 1
     assert events == ["inserted_uncommitted", "logout"]
@@ -341,18 +347,26 @@ def test_run_update_logs_out_and_rolls_back_uncommitted_rows_when_aborted(
     assert uncommitted_rows == (0,)
 
 def test_run_update_exits_nonzero_when_login_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    database_config: bao_stock.JsonObject, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """登录失败必须以退出码 1 收场——按退出码判成败的调用方不能把「什么都没做」当「做完了」。"""
-    monkeypatch.setattr(bao_stock, "DB_PATH", str(tmp_path / "stock_data.db"))
     monkeypatch.setattr(bao_stock, "login_with_retry", lambda *args, **kwargs: None)
 
     with pytest.raises(SystemExit) as raised_error:
-        bao_stock._run_update(lambda connection: None)
+        bao_stock._run_update(lambda connection: None, database_config)
 
     # SystemExit 携带字符串时解释器以状态 1 退出并把该串写进 stderr；两项都要，故断言内容而非 1。
     assert raised_error.value.code != 0
     assert "登录失败" in str(raised_error.value.code)
+
+def test_run_update_requires_database_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """库路径缺配置项即报错，且必须发生在登录之前——不能白登一次再喊缺键。"""
+    monkeypatch.setattr(bao_stock, "login_with_retry", lambda *args, **kwargs: pytest.fail("缺键不该走到登录"))
+
+    with pytest.raises(SystemExit) as raised_error:
+        bao_stock._run_update(lambda connection: None, {"stocks": ["sh.600000"]})
+
+    assert "database_path" in str(raised_error.value.code)
 
 def test_update_industry_keeps_own_update_date_and_survives_second_run(
     initialized_connection: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch

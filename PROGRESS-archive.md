@@ -1,8 +1,17 @@
 # PROGRESS 归档 · QuoteHub
 
-本文件存放 `PROGRESS.md` 已关闭条目的**原文**（含当时的判据与理由），按 ID 倒序排列；检索入口见 [PROGRESS-index.md](PROGRESS-index.md)。
+本文件存放 `PROGRESS.md` 已关闭条目的**原文**（含当时的判据与理由）；`D` 系列在前、`Q` 系列在后，各自 ID 倒序。检索入口见 [PROGRESS-index.md](PROGRESS-index.md)。
 
 ID 规则：`D`＝原 ✅ ／ `Q`＝原 ❓ ／ `R`＝原 🔄，编号取自 **2026-10-10 首次拆分当日**的文档顺序，此后永久稳定；新增条目在**首次归档时**按当时顺序续编。
+
+## D.10 三键一律必填：删掉 default_start_date 的三处代码兜底
+
+- 原日期：2026-10-10
+- 提交：`9fa0dcc`/`35ebfc2`/`06bd8e7`
+
+原文：
+
+- 2026-10-10：**三键一律必填：删掉 `default_start_date` 的三处代码兜底**（用户指正："我不是说了不要兜底值，缺参数报错吗？"）。**问题**：上一轮裁定"配置一律不兜底"时只落地了 `stocks` 与 `parquet_output_root`，`default_start_date` 仍在代码里留兜底常量——`bao_stock.py:1178`/`:1270` 的 `2000-01-01`、`bao_stock_parquet.py:919` 的 `2015-01-01`，等于把同一裁定执行了一半。**提交**：`9fa0dcc` 代码与测试、`35ebfc2` 文档、本条 PROGRESS。**改动**：① 三处 `config.get("default_start_date", …)` 全部改 `require_config_value(config, "default_start_date", …)`；② `update_all_extended` 的守卫**上提到函数开头**与 `stocks` 并列——原位置在 4/7 步（`sync_securities`/`update_industry`/`update_index_constituents` 之后），那时库已被写过一半，失败点越晚越难受，守卫的意义就是"把问题停在启动那一刻"（该函数 docstring 原文）；③ `bao_stock_parquet.py` 传 `arguments.config` 而非常量，错误信息指名实际配置文件；④ 模块 docstring 由"output_root 与代码清单无兜底"改为"三个配置键均无代码兜底"；⑤ 两份文档同步（管线 §2.3 缺省列改 **无（必填）**、注意段由单键推广为三键；采集器 §3 去掉"可省、代码兜底"）；⑥ 新增测试 `test_require_config_value_exits_on_missing_start_date`。**未动（非配置兜底）**：`bao_stock.py` 的 `_update_deposit_rates` / `_update_loan_rates` / `_update_required_reserve_ratio` 里 `start_date="2000-01-01"` 是宏观利率接口"清空重取全历史"的固定入参，与配置无关，不属兜底。**验证**：`git grep "config.get("` 仅剩 `require_config_value` 自身那次无默认值的读取与本文档历史条目；缺 `default_start_date` 时 `bao_stock.py --update-all` 与 `bao_stock_parquet.py update` 均 `配置缺少必填项 default_start_date（config.json）`、exit 1；`py_compile` 通过、`python -m pytest -q` → **37 passed**；两脚本 `--help` 退出码 0。
 
 ## D.09 两份配置合并回单一 config.json
 
@@ -94,3 +103,21 @@ ID 规则：`D`＝原 ✅ ／ `Q`＝原 ❓ ／ `R`＝原 🔄，编号取自 **
 - 验证：baostock 端到端登录 + K 线取数成功；`bao_stock.py` 与 `bao_stock_parquet.py` 均可正常加载（`--help` 退出码 0）。
 
 > **⚠️ 2026-10-10 复核：本节事实（上面 4 条）已全部失效。** 本机全局 Python 现为 **3.14.7**（非 3.14.5），其 `site-packages` 里 **baostock / pandas / pyarrow / numpy 四个包一个都没有**（只剩 fastapi、httpx、pytest、SQLAlchemy、pillow 等另一批包），`pip config list` 为空、`C:\Users\15031\pip\` 目录连同其中的清华源 `pip.ini` 也不存在。实测 `python bao_stock_parquet.py --help` 立即 `ModuleNotFoundError: No module named 'baostock'`。推断该 Python 安装被重装/替换过（site-packages 是另一套），但**属推断，未取证**。上面四条不删，作为"当时曾成立"的记录保留。→ **同日已恢复，见下方 ✅ 2026-10-10 环境重建条。**
+
+## Q.07 DB_PATH 仍是仓根硬编码相对路径
+
+- 原日期：2026-10-10
+- 结论：2026-10-13 改为配置键 `database_path`，导出符号 `DB_PATH` 一并删除——见 D.15。
+
+原文：
+
+- `DB_PATH = "stock_data.db"` 仍是仓根硬编码相对路径，没改成配置项（与契约 §1「必须在仓根运行」自洽，故当初判为未动而非缺陷）。见归档 D.09。
+
+## Q.04 Python 运行时是否锁定小版本
+
+- 原日期：2026-10-10
+- 结论：2026-10-13 用户裁定——**基线只定大版本 3.14，小版本不指定**；README「安装」段据此改写。
+
+原文：
+
+- 是否需要把 Python 运行时也锁定为其他 LTS 版本（原基线 3.14.5，本机现为 3.14.7，且 3.14.7 已被本次重建沿用）。

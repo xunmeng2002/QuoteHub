@@ -1,6 +1,6 @@
 """BaoStock 分钟线 → SQLite → QuantTrading 回测 Bar Parquet 管线。
 
-数据流：BaoStock 只读增量拉取 → SQLite（stock_data.db，唯一事实源）→ 三代 Parquet 文件：
+数据流：BaoStock 只读增量拉取 → SQLite（database_path 指向的库，唯一事实源）→ 三代 Parquet 文件：
 
     <output_root>/Bar/Identity=<EXCH>.Stock/Year=<YYYY>/
         YYYYMMDD_<freq>m.parquet   日度：update 每个交易日新增一个文件（Parquet 不可修改，当月只增不改）
@@ -26,10 +26,10 @@ Parquet 文件成为数据库的纯再导出（不做文件侧合并），从根
     - 文件名带频率后缀（_5m）：四种频率可并存于同一目录，回测按 Identity 目录 + 日期过滤。
     - 股票回测需在 QuantTrading 的 BackTest.json 中将 MdDataPath 指向 output_root，
       ExchangeID 用 SSE/SZSE，InstrumentID 用 6 位代码（如 600519）。
-    - SQLite 路径复用 bao_stock.DB_PATH（stock_data.db），须在 QuoteHub 目录下运行；
+    - SQLite 路径取自配置键 database_path，须在 QuoteHub 目录下运行；
       建表由 bao_stock.init_database 自动应用（加载 sql/schema/Create_v1.0.0.sql 后依次执行 sql/upgrades/ 下全部脚本）。
     - 配置键均**无代码兜底**，一律必填，缺任一即报错退出；但只在真正用到它的
-      子命令上要求：parquet_output_root 与 stocks 每个子命令都要（另有
+      子命令上要求：database_path、parquet_output_root 与 stocks 每个子命令都要（后两者另有
       --output-root / --codes 命令行替代），default_start_date 仅 update 需要。
 """
 
@@ -53,7 +53,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from bao_stock import (
-    DB_PATH,
     JsonObject,
     collect_rows_or_raise,
     enable_socket_timeout,
@@ -275,13 +274,17 @@ def detect_cumulative_mode(bar_values: list[float], daily_total: float) -> bool:
 
 # ---------- SQLite 入库 / 读取（事实源） ----------
 
-def connect_database() -> sqlite3.Connection:
+def connect_database(config: JsonObject, config_file: str) -> sqlite3.Connection:
     """打开数据库连接并确保 Schema 已就绪。
+
+    Args:
+        config: 解析后的配置字典，须含 database_path 键。
+        config_file: 配置文件路径，仅用于拼错误提示。
 
     Returns:
         SQLite 连接；调用方须用 `contextlib.closing` 保证关闭。
     """
-    connection = sqlite3.connect(DB_PATH)
+    connection = sqlite3.connect(require_config_value(config, "database_path", config_file))
     init_database(connection)
     return connection
 
@@ -915,7 +918,7 @@ def parse_arguments() -> argparse.Namespace:
         """
         sub_parser.add_argument(
             "--config", default=CONFIG_FILE,
-            help=f"配置文件路径，缺省 {CONFIG_FILE}（与 bao_stock.py 共用，含 stocks / default_start_date / parquet_output_root）",
+            help=f"配置文件路径，缺省 {CONFIG_FILE}（与 bao_stock.py 共用，含 stocks / default_start_date / parquet_output_root / database_path）",
         )
         sub_parser.add_argument("--codes", default=None, help="逗号分隔的证券代码，缺省取配置文件 stocks")
         sub_parser.add_argument("--frequency", default=DEFAULT_FREQUENCY, choices=["5", "15", "30", "60"], help="分钟频率")
@@ -951,7 +954,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     output_root = resolve_output_root(arguments.output_root, config, arguments.config)
 
-    with contextlib.closing(connect_database()) as connection:
+    with contextlib.closing(connect_database(config, arguments.config)) as connection:
         logged_in = False
         try:
             if arguments.command in ("update", "backfill"):

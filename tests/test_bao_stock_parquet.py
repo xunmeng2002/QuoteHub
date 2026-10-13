@@ -108,6 +108,26 @@ def initialized_connection(tmp_path: Path) -> Iterator[sqlite3.Connection]:
         bao_stock.init_database(connection)
         yield connection
 
+def test_connect_database_opens_configured_path(tmp_path: Path) -> None:
+    """库路径取自配置键 database_path，且建表照旧由 init_database 自动应用。"""
+    configured_path = tmp_path / "configured.db"
+
+    with closing(bao_stock_parquet.connect_database({"database_path": str(configured_path)}, "config.json")) as connection:
+        stored_tables = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+
+    assert configured_path.exists()
+    assert ("MinuteBars",) in stored_tables
+
+def test_connect_database_names_the_config_file_it_was_given(tmp_path: Path) -> None:
+    """错误提示须指向实际读的那个配置路径，而非常量 CONFIG_FILE——管线支持 --config。"""
+    other_config_file = str(tmp_path / "elsewhere.json")
+
+    with pytest.raises(SystemExit) as exit_info:
+        bao_stock_parquet.connect_database({}, other_config_file)
+
+    assert "database_path" in str(exit_info.value)
+    assert other_config_file in str(exit_info.value)
+
 def test_run_backfill_exports_in_progress_year_as_monthly_files(
     initialized_connection: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:

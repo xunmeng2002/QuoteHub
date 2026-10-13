@@ -14,11 +14,11 @@ BaoStock 行情采集组件：把证券宝（BaoStock）的日线、基本面与
 | `config.json` | 两个脚本共用的配置 |
 | `version.txt` | 版本号的唯一来源 |
 
-两个脚本共用同一个 `stock_data.db`。
+两个脚本共用同一个 SQLite 库（`config.json` 的 `database_path`，缺省 `stock_data.db`）。
 
 ## 安装
 
-本项目在 Python 3.14.7 上验证；其他版本未做兼容性验证。
+本项目基于 Python 3.14（3.14.x 各小版本均可）；其他大版本未做兼容性验证。
 
 ```text
 pip install -r requirements.txt
@@ -26,22 +26,23 @@ pip install -r requirements.txt
 
 ## 配置
 
-`config.json` 三个键，一律不兜底——**用到它的命令**上缺了即报错退出（不是每个命令都读，见下表右列）。
+`config.json` 四个键，一律不兜底——**用到它的命令**上缺了即报错退出（不是每条命令都读全部键，见下表右列）。
 
 | 键 | 说明 | 在哪些命令上必填 |
 | ---- | ---- | ---- |
 | `stocks` | 证券代码列表，`sh.` / `sz.` 前缀 + 6 位代码 | 见下方说明 |
 | `default_start_date` | 库中无数据时的回补起点 | 管线 `update`；`bao_stock.py` 的 `--update` / `--update-all` |
 | `parquet_output_root` | Parquet 输出根，**相对当前工作目录**解析 | 管线四个子命令（`--output-root` 可替代） |
+| `database_path` | SQLite 库位置，**相对当前工作目录**解析 | 除 `--version` / `--help` / 无参数外的所有命令 |
 
 `stocks` 的适用范围：管线四个子命令（`backfill` / `update` / `merge-month` / `merge-year`），以及
 `bao_stock.py` 的 `--update` / `--update-all` / `--update-financials` / `--update-dividends` /
-`--update-reports`。`--codes` 只在管线上可用。其余命令（`--sync-securities` / `--update-trade-dates` /
-`--update-index` / `--update-industry` / `--update-macro` / `--version`）不读配置。
+`--update-reports`。`--codes` 只在管线上可用。`database_path` 则是每个连库命令都要读的——
+只有 `--version`、`--help` 与无参数这三种情形在加载配置之前就返回，其余（含未知选项）一律先读配置。
 
 ## 快速开始
 
-**必须在仓根运行**——`stock_data.db` 与 `config.json` 都是相对路径，换目录会另建一个空库。
+**必须在仓根运行**——`config.json` 与它给出的 `database_path` 都是相对路径，换目录会另建一个空库。
 
 首次建库：
 
