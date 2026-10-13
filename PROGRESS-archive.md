@@ -4,6 +4,17 @@
 
 ID 规则：`D`＝原 ✅ ／ `Q`＝原 ❓ ／ `R`＝原 🔄，编号取自 **2026-10-10 首次拆分当日**的文档顺序，此后永久稳定；新增条目在**首次归档时**按当时顺序续编。
 
+## D.14 回补当年改月度文件 ＋ 登录失败退出码 ＋ 先查后删 ＋ DRY 收敛 ＋ 口径差文档纠正
+
+- 原日期：2026-10-10
+- 提交：`08b6133`
+
+原文：
+
+- **D.14** 2026-10-10：**回补当年改月度文件 ＋ 登录失败退出码 ＋ 先查后删 ＋ DRY 收敛 ＋ 口径差文档纠正**（用户裁定"四项全修"、PROGRESS 归档"现在就拆分"）。**① 当年年度文件重叠**：`backfill` 区间含**尚未结束的当年**时会写 `2026_5m.parquet`（一年一文件、覆盖整年），而之后 `update` 的日度文件、`merge-month` 的月度文件都会与它在同一天重叠；消费方回放 SQL（`QuantTrading/src/BackTest/MdReader.cpp`）按 `Year=*/*.parquet` 扫描且**不去重**（只 `ORDER BY UpdateTs`），同一天会被回放两次。改法：当年改走 `run_merge_month` 按月写出（`YYYYMM_5m.parquet`），当年不再写年度文件（留给次年 `merge-year`）；`merge-month` 的归档模式只认 8 位日度文件，动不了 4 位的年度文件，故重叠真会发生。**已落地的数据修整**：先逐月 `merge-month --month 202601…202610` 把当年物化为月度文件，再删掉那两份临时年度文件——删前已核对**键集完全等价**（`(InstrumentID, UpdateTs)` 无年度独有、无月度独有、无重复），删后逐 `Year=` 目录复核"行数 == 去重键数"。消费方按 `Year=*/*.parquet` 读到的行集不变，仅当年文件粒度由年改为月。**② 登录失败退出码**：`bao_stock.py` 的 `login_with_retry` 失败原本"记 error 后 return"，三处入口（`--update`/`--sync-securities`/`--update-all` 共用的 `_run_update`）以**退出码 0** 收场，与 v1.0.0 宣称的"按退出码判成败的消费方从此能真正看到失败"自相矛盾；改为 `raise SystemExit("BaoStock 登录失败，操作取消")`——退出码 1、stderr 仍含 `登录失败` 子串，消费方的失败分类依据不变。**③ 先删后查 → 先查后删**：`update_trade_dates` 与 `update_index_constituents` 原先先 `DELETE` 再查上游，上游 `err=0` 但返回 0 行时提前 return、`_run_update` 随后提交——等于把交易日历／当日成分股快照**清空却报成功**；改为查成功且有行才 `DELETE`，0 行只记 warning 并保留库内现有数据。**④ DRY**：三份几乎相同的「登录 → 中止转换 → 注销并回滚」脚手架收敛到 `_run_update(operation)` 一处，`update_all` 随之改为接收 `connection`。**⑤ 口径差纠正**：文档与代码注释里"约 0.4% 的固有口径差"实测不成立——分钟量合计与日线量在 2020–2022 与 2026 **逐日精确相等**（0.000%），仅 2023–2025 有部分交易日偏离 1%~7%（金额同步偏离），已按实测改写 `docs/baostock-parquet-pipeline.md` §6/§7、`docs/baostock-component-contract.md` §3.2 与代码注释。**验证**：新增回归用例（登录失败退出码非 0、中止路径注销且回滚未提交行、上游 0 行不得清空日历／成分股、回补当年写月度文件），`version.txt` 升 `v1.0.1`，`CHANGELOG.md` 增 v1.0.1 段。
+
+- **D.14 续（同一批未提交改动）2026-10-10：code-reviewer 审出四条，逐条核实后全部落地。****① 测试净损失（我自己造的，最重）**：上一轮把 `tests/test_bao_stock_parquet.py` **整份覆盖**，原文件 11 个用例（`split_stock_code` / `group_codes_by_exchange` / `to_sqlite_value` / `merge_day_spans` / `_spans_are_contiguous` / `bar_file_path` / `get_last_month` / `detect_cumulative_mode`）只剩 1 个，`pytest` 从 51 掉到 32 我却当成"数字记错了"——**记错的不是旧记录，是我漏看了掉幅**。已 `git show HEAD:tests/test_bao_stock_parquet.py` 取回全部原用例并与新用例合并，现 **58 passed**。**教训**：整份覆盖一个已有文件等于静默删除，改测试文件前先 `git diff --stat` 看掉幅。**② 「先查后删」只改了一半**：同类路径还有 8 处——财务单键表 4 处（`_fetch_and_store_financial` / `DividendData` / `PerformanceExpress` / `ForecastReports`，0 行时 `continue`/`return 0`）与四张宏观表（`DepositRates` / `LoanRates` / `ReserveRatios` / `MoneySupply`，0 行时整表已被 `DELETE`），全部按同一模式把 `DELETE` 移到"确认有行"之后、0 行记 warning 并保留库内数据；新增 2 个回归用例（财务单键 `BalanceData`、宏观 `DepositRates`）。**③ `run_backfill` 三处自造问题**：两条近乎相同的 `MinuteBars` 查询收敛为助手 `_query_backfilled_months`（DRY）；补 `if not stock_codes: return`（空清单会拼出 `Code IN ()` 非法 SQL）；注释「偏离 1%~7%」与文档「单日最大 7.3%」对齐。**④ 未采纳一条**：审查建议把登录失败也改成 `SystemExit(1)` ＋ `logger.error` 以求载荷类型一致——那会动到消费方正匹配的 stderr 子串（见 Q.02），不擅自改。**另记一条新未决**（Q.09）：`backfill` 写已结束年度的年度文件时不归档该年既有月度文件，本命令刻意不动既有文件，该情形应用 `merge-year`，已在两处文档与 docstring 写明。`python -m pytest -q` → **58 passed**。**提交**：`08b6133`（本条与续条一并）。
+
 ## D.13 --update-all 的假成功与行业分类主键崩溃
 
 - 原日期：2026-10-10
