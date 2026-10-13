@@ -4,6 +4,15 @@
 
 ID 规则：`D`＝原 ✅ ／ `Q`＝原 ❓ ／ `R`＝原 🔄，编号取自 **2026-10-10 首次拆分当日**的文档顺序，此后永久稳定；新增条目在**首次归档时**按当时顺序续编。
 
+## D.12 网络层加接收超时，修 --update-all 挂死与 Ctrl+C 无效
+
+- 原日期：2026-10-10
+- 提交：`96fc0c2`/`6a67a09`
+
+原文：
+
+- **D.12** 2026-10-10：**网络层加接收超时，修掉 `--update-all` 永久挂死与 Ctrl+C 无效**（用户裁定「加吧」）。**现象**：`python bao_stock.py --update-all` 停在「1/7 证券同步」后的「证券同步基准日期: 2026-10-09」，30+ 分钟再无输出。**取证**：`Get-Process python` 显示 CPU 仅 0.5 秒、工作集 2.8 MB，且 3 秒内两次采样完全一致——空转在 I/O 上，不是死循环也不是在算。**根因（第三方库）**：`baostock/util/socketutil.py` 的 `send_msg` 建 socket 时**不设超时**，收包循环 `while True: recv(8192)` 又只在攒到结尾分隔符时才退出；上游 `public-api.baostock.com`（解析到 114.94.20.42:10030）的大响应当时严重降速——裸字节探针实测 `query_all_stock` 整包约 130 KB，30 秒只吐 40 KB（约 1.3 KB/s）后停住。小响应则完全正常：`login` 0.2 s、`query_trade_dates` 0.1 s、`query_history_k_data_plus` 0.5 s。**Ctrl+C 也退不出的原因**：中断确实抛出了，但落在 `finally: bs.logout()` 里，而 `logout()` 内部同样走 `sock.send_msg`、在**同一个** socket 上再收一次包——于是又掉回无超时的收包循环，表现为「按了没反应」。**改动六处**：① 新增常量 `SOCKET_TIMEOUT_SECONDS = 60`；② 新增 `enable_socket_timeout()`——`socket.setdefaulttimeout(...)`，**必须早于首次登录**（baostock 的 socket 在 `login` 时创建，晚了不生效）；③ 新增 `logout_quietly()`——把 `bs.logout()` 包进 `try/except Exception` 只记 warning，保证清理阶段不盖掉真正的失败原因，且 `KeyboardInterrupt` 不属 `Exception`，故第二次 Ctrl+C 能立即中断注销；④ 三处 `bs.logout()`（`_run_update` / `update_all` / `--sync-securities` 分支）与管线 `main()` 那处一并改 `logout_quietly()`；⑤ 两脚本入口各调一次 `enable_socket_timeout()`；⑥ 顺带补 `bao_stock.py` **末尾缺失的换行**（`.editorconfig` 的 `insert_final_newline`）——属既有问题，`git show HEAD:bao_stock.py` 末尾即为右括号无换行，非本次引入。**阈值为何取 60 秒**：这是**每次 `recv`** 的超时、不是整包总时长，只有服务端**连续停顿**超过阈值才判失败；实测正常分块间隔约 6 秒，60 秒约为其 10 倍，故不取小。**验证**：① `probe4` 确认调用后 baostock 在 login 时建的 socket `gettimeout()` 读回 `60.0`（默认原本是 `None`）；② `probe5` 端到端确认对当前降速接口的调用在 **124.8 秒**后返回 `err=10002007 网络接收错误。`（两个超时周期）而非永久挂死，`sync_securities` 会据此记「获取证券列表失败」并返回；③ `python -m pytest -q` → **40 passed**（新增两用例：默认超时被置为常量、`logout_quietly` 吞掉 `OSError`），`py_compile` 通过，三个改动文件 CRLF=0、行长 ≤150。**遗留风险**：阈值只把「挂死」变成「有界失败」，不解决「上游很慢」，最坏一次失败约 2 分钟；Ctrl+C 若正好落在 `logout_quietly()` 内，仍需再按一次才立即退出。**旁记**：管线 `bao_stock_parquet.py backfill` 只走 `query_history_k_data_plus` 与本地库，不碰这三个降速接口，是当时唯一能出数据的路。
+
 ## D.11 版本化与发布物（v1.0.0）
 
 - 原日期：2026-10-10
@@ -113,6 +122,15 @@ ID 规则：`D`＝原 ✅ ／ `Q`＝原 ❓ ／ `R`＝原 🔄，编号取自 **
 - 验证：baostock 端到端登录 + K 线取数成功；`bao_stock.py` 与 `bao_stock_parquet.py` 均可正常加载（`--help` 退出码 0）。
 
 > **⚠️ 2026-10-10 复核：本节事实（上面 4 条）已全部失效。** 本机全局 Python 现为 **3.14.7**（非 3.14.5），其 `site-packages` 里 **baostock / pandas / pyarrow / numpy 四个包一个都没有**（只剩 fastapi、httpx、pytest、SQLAlchemy、pillow 等另一批包），`pip config list` 为空、`C:\Users\15031\pip\` 目录连同其中的清华源 `pip.ini` 也不存在。实测 `python bao_stock_parquet.py --help` 立即 `ModuleNotFoundError: No module named 'baostock'`。推断该 Python 安装被重装/替换过（site-packages 是另一套），但**属推断，未取证**。上面四条不删，作为"当时曾成立"的记录保留。→ **同日已恢复，见下方 ✅ 2026-10-10 环境重建条。**
+
+## Q.10 sql/schema 索引名 IX_* 不合 Idx* 规范
+
+- 原日期：2026-10-13
+- 结论：2026-10-13 用户裁定「命名问题检查一下，按照规范一起改了」——两个索引改名 `IdxMinuteBarsFrequencyTradingDay` / `IdxMinuteBarTradingDaysTradingDay`，真库既有索引同步重命名后重新打戳。见 D.17。
+
+原文：
+
+- **Q.10** `sql/schema/Create_v1.0.0.sql` 的两个索引名 `IX_MinuteBars_Frequency_TradingDay` 与 `IX_MinuteBarTradingDays_TradingDay` 不合 `rules/database-style.md` §1（应为 `Idx<表><列>`，即 `IdxMinuteBarsFrequencyTradingDay` 与 `IdxMinuteBarTradingDaysTradingDay`）。该命名自旧 `Update_v2.1.0.sql` 原样搬入，本批重写 schema 时按「最小改动」未一并改（同批已把三张分钟线表的匿名主键补成合规的 `CONSTRAINT Pk…`）。**改它得连用户库里的既有索引一起重命名**——结构比对含索引名，只改 schema 会让存量库判为结构不符。是否改由用户定。
 
 ## Q.07 DB_PATH 仍是仓根硬编码相对路径
 
