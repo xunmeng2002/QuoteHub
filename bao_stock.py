@@ -51,7 +51,7 @@ LOG_LEVEL = logging.INFO
 LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 MAX_LOGIN_RETRIES = 5
 RETRY_DELAY_SECONDS = 5
-SOCKET_TIMEOUT_SECONDS = 300
+SOCKET_TIMEOUT_SECONDS = 120
 
 # 服务端在会话失效后对任何查询都返回此码（客户端源码里没有「用户未登录」这句文案，只能是服务端发的）
 BAOSTOCK_SESSION_LOST_ERROR_CODE = "10001001"
@@ -171,8 +171,11 @@ def enable_socket_timeout() -> None:
 
     Note:
         这是**每次 `recv`** 的超时，不是整包总时长——只有服务端连续停顿时长超过阈值才判失败，
-        正常但缓慢的传输不受影响，故阈值不宜取小。baostock 的 socket 在 `login` 时创建，
-        必须在首次登录之前调用本函数才会生效。
+        正常但缓慢的传输不受影响。超时本身会**污染这条 socket**：`send_msg` 出错后既不重连也不
+        清空接收缓冲，残留字节让此后每次读取都错位，故超时不是「等下一包」而是「换条连接才
+        能继续」。阈值只需高于正常单次停顿，恢复由上层重试承担——**目前只有分钟线管线**
+        （`bao_stock_parquet.ingest_stock`）有这条重试，`bao_stock.py` 侧仍是无重试的整轮中止。
+        baostock 的 socket 在 `login` 时创建，必须在首次登录之前调用本函数才会生效。
     """
     socket.setdefaulttimeout(SOCKET_TIMEOUT_SECONDS)
 

@@ -9,6 +9,7 @@ from contextlib import closing
 from datetime import date
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 import bao_stock
@@ -171,3 +172,103 @@ def test_run_backfill_exports_in_progress_year_as_monthly_files(
 
     assert exported_months == [f"{in_progress_year}10"]
     assert exported_periods == [str(completed_year)]
+
+def test_ingest_stock_relogins_and_retries_after_interrupted_fetch(
+    initialized_connection: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取数中断即重登录并整票重试：baostock 一超时就废掉 socket，不换连接则此后每次查询都失败。"""
+    fetch_count = 0
+    login_count = 0
+
+    def interrupt_then_succeed(*args: object, **kwargs: object) -> list[str]:
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 1:
+            raise bao_stock.BaostockPaginationInterruptedError("分页中断")
+        return ["2026-10-13"]
+
+    def record_login(*args: object, **kwargs: object) -> object:
+        nonlocal login_count
+        login_count += 1
+        return object()
+
+    monkeypatch.setattr(bao_stock_parquet, "_ingest_stock_once", interrupt_then_succeed)
+    monkeypatch.setattr(bao_stock_parquet, "login_with_retry", record_login)
+
+    recovered_days = bao_stock_parquet.ingest_stock(initialized_connection, "sh.600000", "5", "2020-01-01", "2026-10-13")
+
+    assert recovered_days == ["2026-10-13"]
+    assert fetch_count == 2
+    assert login_count == 1
+
+def test_ingest_stock_gives_up_after_retry_limit(
+    initialized_connection: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重试有上限：尝试次数用尽即把原错误抛出，不无限重登录。"""
+    login_count = 0
+
+    def always_interrupt(*args: object, **kwargs: object) -> list[str]:
+        raise bao_stock.BaostockSessionLostError("会话已失效")
+
+    def record_login(*args: object, **kwargs: object) -> object:
+        nonlocal login_count
+        login_count += 1
+        return object()
+
+    monkeypatch.setattr(bao_stock_parquet, "_ingest_stock_once", always_interrupt)
+    monkeypatch.setattr(bao_stock_parquet, "login_with_retry", record_login)
+
+    with pytest.raises(bao_stock.BaostockSessionLostError):
+        bao_stock_parquet.ingest_stock(initialized_connection, "sh.600000", "5", "2020-01-01", "2026-10-13")
+
+    assert login_count == bao_stock_parquet.SESSION_RETRY_ATTEMPTS - 1
+
+def test_ingest_stock_stops_when_relogin_fails(
+    initialized_connection: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重登录失败即放弃该票，不再拿已废的会话白试；原错误原样上抛以便留下根因。"""
+    fetch_count = 0
+    login_count = 0
+
+    def always_interrupt(*args: object, **kwargs: object) -> list[str]:
+        nonlocal fetch_count
+        fetch_count += 1
+        raise bao_stock.BaostockPaginationInterruptedError("分页中断")
+
+    def fail_login(*args: object, **kwargs: object) -> None:
+        nonlocal login_count
+        login_count += 1
+
+    monkeypatch.setattr(bao_stock_parquet, "_ingest_stock_once", always_interrupt)
+    monkeypatch.setattr(bao_stock_parquet, "login_with_retry", fail_login)
+
+    with pytest.raises(bao_stock.BaostockPaginationInterruptedError):
+        bao_stock_parquet.ingest_stock(initialized_connection, "sh.600000", "5", "2020-01-01", "2026-10-13")
+
+    assert fetch_count == 1
+    assert login_count == 1
+
+def test_ingest_stock_leaves_no_partial_rows_when_fetch_is_interrupted(
+    initialized_connection: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """中断不落半份数据：日线失败时已取到的分钟线也不得入库、不得记已问区间——整票重试的安全性正靠这一条。"""
+    minute_frame = pd.DataFrame(
+        [["2026-10-13", "20261013150000000", "sh.600000", "1", "1", "1", "1", "1", "1"]],
+        columns=bao_stock_parquet.MINUTE_K_FIELDS.split(","),
+    )
+
+    def raise_on_daily(*args: object, **kwargs: object) -> pd.DataFrame:
+        raise bao_stock.BaostockPaginationInterruptedError("日线分页中断")
+
+    monkeypatch.setattr(bao_stock_parquet, "query_minute_bars", lambda *args, **kwargs: minute_frame)
+    monkeypatch.setattr(bao_stock_parquet, "query_daily_bars", raise_on_daily)
+    monkeypatch.setattr(bao_stock_parquet, "login_with_retry", lambda *args, **kwargs: object())
+
+    with pytest.raises(bao_stock.BaostockPaginationInterruptedError):
+        bao_stock_parquet.ingest_stock(initialized_connection, "sh.600000", "5", "2020-01-01", "2026-10-13")
+
+    stored_minute_bar_count = initialized_connection.execute("SELECT COUNT(*) FROM MinuteBars").fetchone()[0]
+    stored_span_count = initialized_connection.execute("SELECT COUNT(*) FROM QueriedBarSpans").fetchone()[0]
+
+    assert stored_minute_bar_count == 0
+    assert stored_span_count == 0

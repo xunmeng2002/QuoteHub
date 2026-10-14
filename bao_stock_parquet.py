@@ -53,6 +53,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from bao_stock import (
+    BaostockPaginationInterruptedError,
+    BaostockSessionLostError,
     JsonObject,
     collect_rows_or_raise,
     enable_socket_timeout,
@@ -71,6 +73,9 @@ logger = logging.getLogger(__name__)
 CONFIG_FILE = "config.json"
 CONFIG_KEY_OUTPUT_ROOT = "parquet_output_root"
 DEFAULT_FREQUENCY = "5"
+
+# 取数中断后重登录并重试该票的最大尝试次数（含首次），详见 ingest_stock。
+SESSION_RETRY_ATTEMPTS = 3
 
 MINUTE_K_FIELDS = "date,time,code,open,high,low,close,volume,amount"
 DAILY_K_FIELDS = "date,code,preclose,volume,amount"
@@ -407,7 +412,40 @@ def _spans_are_contiguous(next_start: str, current_end: str) -> bool:
     )
 
 def ingest_stock(connection: sqlite3.Connection, stock_code: str, frequency: str, start_date: str, end_date: str) -> list[str]:
-    """拉取单只股票区间数据并入库，返回有分钟数据的交易日（'YYYY-MM-DD' 升序）。
+    """拉取单只股票区间数据并入库；取数中断时换新 socket 重登录后重试该票。
+
+    重登录是必需而非可选：baostock 的 `send_msg` 一遇异常就只 `print` 后返回 `None`，既不重连
+    也不清空接收缓冲，残留字节会让此后**每次**读取都错位——不换连接，重试也只是再失败一次。
+
+    整票重试安全，因为 `_ingest_stock_once` 在两路查询都成功之后才写库（中断时库里没有半份
+    数据、也不会记上已问区间），且各 `upsert_*` 由主键保证幂等。
+
+    Args:
+        connection: 已打开的 SQLite 连接。
+        stock_code: Baostock 格式证券代码。
+        frequency: 分钟频率。
+        start_date: 起始日期 'YYYY-MM-DD'（含）。
+        end_date: 结束日期 'YYYY-MM-DD'（含）。
+
+    Returns:
+        有分钟数据的交易日列表，'YYYY-MM-DD' 升序。
+
+    Raises:
+        BaostockSessionLostError: 会话失效，且已用尽 SESSION_RETRY_ATTEMPTS 次或重登录本身失败。
+        BaostockPaginationInterruptedError: 分页中断（含接收超时），同上。两种情形都**原样上抛**
+            首次捕获到的那个错误，不替换、不掩盖根因。
+    """
+    for attempt in range(1, SESSION_RETRY_ATTEMPTS + 1):
+        try:
+            return _ingest_stock_once(connection, stock_code, frequency, start_date, end_date)
+        except (BaostockSessionLostError, BaostockPaginationInterruptedError) as ingest_error:
+            if attempt == SESSION_RETRY_ATTEMPTS or login_with_retry() is None:
+                raise
+            logger.warning("%s 取数中断（第 %s/%s 次）：%s；已重登录，重试该票",
+                           stock_code, attempt, SESSION_RETRY_ATTEMPTS, ingest_error)
+
+def _ingest_stock_once(connection: sqlite3.Connection, stock_code: str, frequency: str, start_date: str, end_date: str) -> list[str]:
+    """拉取并入库一次，不做会话重试。
 
     账在**两路查询都成功之后**才记：`query_minute_bars` / `query_daily_bars` 在上游失败时都会
     抛，抛了就写到账这一步；能记上就说明这一段的答案是上游给的，而不是我们被中断后猜的。
@@ -423,7 +461,8 @@ def ingest_stock(connection: sqlite3.Connection, stock_code: str, frequency: str
         有分钟数据的交易日列表，'YYYY-MM-DD' 升序。
 
     Raises:
-        RuntimeError: 分钟或日线查询失败、分页中断（此时不入库、不记账）。
+        BaostockSessionLostError: 会话已失效（服务端此后对任何查询都返回同一码）。
+        BaostockPaginationInterruptedError: 分钟或日线查询失败、分页中断（此时不入库、不记账）。
     """
     minute_frame = query_minute_bars(stock_code, start_date, end_date, frequency)
     daily_frame = query_daily_bars(stock_code, start_date, end_date)
