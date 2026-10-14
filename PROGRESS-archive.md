@@ -4,6 +4,15 @@
 
 ID 规则：`D`＝原 ✅ ／ `Q`＝原 ❓ ／ `R`＝原 🔄，编号取自 **2026-10-10 首次拆分当日**的文档顺序，此后永久稳定；新增条目在**首次归档时**按当时顺序续编。
 
+## D.15 版本号回到单一 v1.0.0 ＋ DB 路径由硬编码改为配置键 database_path
+
+- 原日期：2026-10-13
+- 提交：`1476759`
+
+原文：
+
+- **D.15** 2026-10-13：**版本号回到单一 `v1.0.0` ＋ DB 路径由硬编码改为配置键 `database_path`**（用户裁定："版本号定为v1.0.0，在正式发布前的修改都不要增加版本号。DB_PATH 可以考虑放到配置文件里面去。"）。**① 版本号回退**：`version.txt` 由 `v1.0.1` 改回 `v1.0.0`，`CHANGELOG.md` 的 `v1.0.0`／`v1.0.1` 两节**并为一节 `## v1.0.0（未发布）`**——两节都还没打 tag、没发 Release（`git tag -l` 为空），发布前的版本切分对外毫无含义，只会让 CHANGELOG 与实际发布物对不上；CHANGELOG 头部改写为"发布前一律累积进当前未发布版本，到发布时才落定版本号并打 tag"（本条同时是**版本号口径**：**正式发布前不新起版本号**）。**② `DB_PATH` → `database_path`**（结掉 Q.07；该符号是导出物，用户已明确授权删除）：`config.json` 增第四键 `"database_path": "stock_data.db"`，**不挪库文件位置**——挪了消费方的只读开库点要同时改，集成有断档风险；相对值与 `parquet_output_root` 同口径、按 CWD 解析。`bao_stock.py` 删掉 `DB_PATH = "stock_data.db"`，改在 `_run_update` 内 `require_config_value(config, "database_path", CONFIG_FILE)`，**域函数签名一律没动**（故只给 `_run_update` 加了一个 `config` 参数，8 个调用点各自传入）。`bao_stock_parquet.py` 的 `connect_database(config, config_file)` 穿 `config_file` 而**不是**模块常量 `CONFIG_FILE`——`main()` 支持 `--config <路径>`，用常量拼错误提示会指向一个从没读过的文件（先例 `resolve_output_root`）。**③ 行为变化（须记 CHANGELOG）**：原本不读配置的 5 个命令（`--sync-securities`／`--update-index`／`--update-industry`／`--update-trade-dates`／`--update-macro`）此后也要读 `config.json`——库路径本就是每个连库命令都要的参数，"不读配置"只因当初路径写死了。**对消费方零可见**：契约 §3.1 写明消费方只以子进程调 `bao_stock_parquet.py`、不 import 本仓代码，故只影响直接用 `bao_stock.py` 的人；这句已写进 CHANGELOG，免得下次跨仓对表被误判成契约变更。另记：未知选项（如 `--bogus`）此前直接打用法、退出码 0，此后会先尝试读配置、仅在配置缺失或损坏时改判退出码 1；`--version` 与 `--help`／无参数不受影响。**④ DRY（§5）**：`__main__` 里 **8 个分支各写一遍**的 `config = load_config_file(CONFIG_FILE)` 收敛为"版本／用法守卫之后的单次加载"，结尾那段内联用法文案提为模块级私有函数 `_log_usage()`；不新增 `sys.exit(0)` 惯例，也不引入 options 清单常量（那会让选项名出现第二份真相来源）。**⑤ 两处口径裁定**：Q.04 结掉——Python 基线**只定大版本 3.14、小版本不指定**，README「安装」段据此由 `3.14.x` 改写；Q.05 删除——六份语言规范的细核属规则仓（`../AI`）事务，不记本仓，**编号不复用**（索引备注已注明）。**验证**：`python -m pytest -q` → **61 passed**（新增 3 例：`_run_update` 缺 `database_path` 时须在**登录之前**报错、`connect_database` 在配置指定路径建库建表、错误提示须指着 `--config` 传进来的那个路径）。临时仓根 `%TEMP%\quotehub-check-CRrR` 内实测四条路径：无 `config.json` 时 `--version` 仍打印 `v1.0.0`、退出码 0；缺文件 → `配置文件不存在: config.json`、退出码 1；有文件缺键 → `配置缺少必填项 database_path（config.json）`、退出码 1；`database_path` 指向临时库时 `--update-trade-dates` 把 **13083 行**写进临时 `check.db`，而仓根真库 `stock_data.db` 的 mtime 未变。两脚本 `--help` 退出码 0、`--version` 均 `v1.0.0`；改动文件逐字节核对 CRLF=0、行长 ≤150。**代码审查（`code-reviewer`）**：**0 严重 / 0 高 / 1 中 / 3 低 / 4 可选**。中一项是**文档口径与代码不符**——重构后未知选项（如 `--bogus`）会先经配置加载，配置缺失时以退出码 1 结束，而 CHANGELOG／README／采集器文档当时写作"只有 `--version`／`--help`／无参数不读配置"，读者会以为未知选项走的是同一条路。**核实后按"改文档、不改代码"处理**：该行为在计划里已声明为刻意变化；要按审查建议做短路，就得再列一份选项名常量，"选项名出现第二份真相来源"正是本次重构要避免的（§5 拒绝过度封装），故只把三处措辞改准（并补"`--help` 现在优先于其它选项，`--update --help` 只打用法"一句）。低三项亦全改：CHANGELOG 里"`--update`／`--sync-securities`／`--update-all` 三处入口共用 `_run_update`"是合并前的旧口径（现已为**全部命令**共用，已改述）、示例 `from BaoStock import DB_PATH` 的模块名大小写已改 `bao_stock`、README 与采集器文档的口径同中一项一并改准。**可选项未采纳**：`stocks` 三处重复取用（仅 3/10 分支需要，提前统一会让其余命令多一次无谓校验并改变报错顺序）、两脚本"取 `database_path` → 连库 → `init_database`"序列的跨文件合并（一侧是 `closing` 上下文、一侧返回连接，控制流确有差别）、`__main__` 无用例触及（入口难直接测，本次也未改其行为契约）、源文件里既有的 `from __future__ import annotations`（本批未增删，属既存偏差）。**提交**：`1476759`（本批一并）。
+
 ## D.14 回补当年改月度文件 ＋ 登录失败退出码 ＋ 先查后删 ＋ DRY 收敛 ＋ 口径差文档纠正
 
 - 原日期：2026-10-10
@@ -164,6 +173,15 @@ ID 规则：`D`＝原 ✅ ／ `Q`＝原 ❓ ／ `R`＝原 🔄，编号取自 **
 - 验证：baostock 端到端登录 + K 线取数成功；`bao_stock.py` 与 `bao_stock_parquet.py` 均可正常加载（`--help` 退出码 0）。
 
 > **⚠️ 2026-10-10 复核：本节事实（上面 4 条）已全部失效。** 本机全局 Python 现为 **3.14.7**（非 3.14.5），其 `site-packages` 里 **baostock / pandas / pyarrow / numpy 四个包一个都没有**（只剩 fastapi、httpx、pytest、SQLAlchemy、pillow 等另一批包），`pip config list` 为空、`C:\Users\15031\pip\` 目录连同其中的清华源 `pip.ini` 也不存在。实测 `python bao_stock_parquet.py --help` 立即 `ModuleNotFoundError: No module named 'baostock'`。推断该 Python 安装被重装/替换过（site-packages 是另一套），但**属推断，未取证**。上面四条不删，作为"当时曾成立"的记录保留。→ **同日已恢复，见下方 ✅ 2026-10-10 环境重建条。**
+
+## Q.11 超时／网络接收错误后不重登录
+
+- 原日期：2026-10-13
+- 结论：2026-10-14 用户裁定「那就按 Q.11 做吧」——`ingest_stock` 捕获会话失效与分页中断后换新 socket 重登录并重试该票（上限 3 次），接收超时阈值随之由 300 s 调回 120 s；docstring「附带待定」亦已补上超时污染 socket 的后果。见 D.20。
+
+原文：
+
+- **Q.11** 超时／网络接收错误（10002007）后**不重登录**：baostock 的 `send_msg` 一遇异常就废掉整条 socket（详见 D.19），而本仓只把它当成"分页中断"中止整轮，不换新 socket 续跑——`BaostockSessionLostError`（10001001）的文案里本就写着"重新登录后再跑"，却没人去做。根治方向：`ingest_stock` 捕获后 `logout_quietly()` + `login_with_retry()` 换新 socket 重试该股（每只票的 ingest 本身原子且幂等，整只重试安全），上限 3 次。是否做由用户定。**附带待定**：`enable_socket_timeout` 的 docstring 是否补上"超时即污染 socket、阈值只降概率"的真实后果（加注释属 Harness §4 例外，须用户确认）。
 
 ## Q.10 sql/schema 索引名 IX_* 不合 Idx* 规范
 
