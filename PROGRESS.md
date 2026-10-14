@@ -25,7 +25,7 @@
 
 - **Q.03**（**半关闭**）`--update-all` 七步连着跑一遍**已于 2026-10-13 首次实测成功**（见 D.18）；仍未实测的是**日常 `--update` 的真接口跑一遍**（该命令落库已由测试桩验过）。
 
-- **Q.06** `v1.0.0` 与 `v1.0.1` 的 git tag 与 Gitee Release 都还没发（对外动作，等用户点头）。见归档 D.11。
+- **Q.06** `v1.0.0` 的 git tag 与 Gitee Release 尚未发布（对外动作，等用户点头）。**发布前不新起版本号**，故只需打 `v1.0.0` 一个 tag——此前误记的 `v1.0.1` 经 2026-10-14 用户裁定为**错误版本号**，已删。**交付形态＝源码**（本仓无 `pyproject.toml`/`setup.py`，平台不 import、只子进程调用＋只读开库），故发布前先出**源码 zip 测试包**（非 Release）供平台部署测试——2026-10-14 已出 `dist/QuoteHub-v1.0.0-src-2026-10-14.zip`（`git archive HEAD` 全仓快照，含文档／tests／PROGRESS 台账，自动不含 `.git`／库／缓存）。`config.json` **原样带出**（用户 2026-10-14 裁定）：平台按契约显式传 `--output-root`／`--codes`，`database_path` 缺省 `stock_data.db` 与平台 `QUOTE_HUB_DATABASE_FILENAME` 一致。见归档 D.11。
 
 - **Q.08** 跨仓遗留：`QuantTrading/bin/Debug/BackTest.json` 仍是迁移前的 `D:\MdBaoStock`（源文件 `Configs/BackTest.json` 与 Release 那份均已改）。该文件是构建期拷贝、不在本仓，重新构建即自愈。见归档 D.02。**2026-10-13 用户裁定**：只关注本仓，本项（属 QuantTrading 仓）**暂搁置**。
 
